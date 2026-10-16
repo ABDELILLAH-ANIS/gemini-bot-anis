@@ -21,7 +21,7 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
-from config import BOT_TOKEN
+from config import BOT_TOKEN, ADMIN_IDS
 import database
 import handlers_customer as cust
 import handlers_admin as adm
@@ -141,15 +141,29 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"لوحة تحكم الإدارة"), adm.admin_panel_command))
     app.add_handler(CallbackQueryHandler(adm.admin_callback_dispatcher, pattern="^adm_"))
     
-    # Admin text handler (for manual links, reject reasons, stock additions, payment edits)
+    # Admin text handler (for manual links, reject reasons, stock additions, payment edits, custom messaging)
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_IDS),
             adm.handle_admin_text_input,
         )
     )
     app.add_handler(CommandHandler("skip_reason", adm.handle_admin_text_input))
     app.add_handler(CommandHandler("cancel_action", adm.handle_admin_text_input))
+
+    # 4. Customer Support Inbound Handlers (outside active order flow)
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & ~filters.User(ADMIN_IDS),
+            cust.handle_customer_inbound_message,
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO & ~filters.User(ADMIN_IDS),
+            cust.handle_customer_inbound_photo,
+        )
+    )
 
     print("\n" + "=" * 60)
     print("🚀 بوت متجر اشتراكات Gemini يعمل بنجاح الآن...")

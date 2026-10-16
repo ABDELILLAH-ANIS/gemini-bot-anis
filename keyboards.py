@@ -88,12 +88,19 @@ def get_cancel_reply_keyboard():
 
 
 def get_admin_order_keyboard(order_id: int):
-    """Buttons on the admin notification for approving or rejecting an order"""
+    """Buttons on the admin notification for approving, manually delivering, notifying, or rejecting an order"""
     keyboard = [
         [
-            InlineKeyboardButton("✅ قبول وتسليم الرابط", callback_data=f"adm_appr:{order_id}"),
+            InlineKeyboardButton("✅ قبول وتسليم تلقائي", callback_data=f"adm_appr:{order_id}"),
+            InlineKeyboardButton("✍️ تسليم يدوي", callback_data=f"adm_manual_deliver:{order_id}"),
+        ],
+        [
+            InlineKeyboardButton("⏳ إشعار: جاري التجهيز", callback_data=f"adm_wait:{order_id}"),
+            InlineKeyboardButton("💬 مراسلة العميل", callback_data=f"adm_msg:{order_id}"),
+        ],
+        [
             InlineKeyboardButton("❌ رفض الطلب", callback_data=f"adm_rej:{order_id}"),
-        ]
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 

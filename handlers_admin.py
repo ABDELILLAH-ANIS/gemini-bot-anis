@@ -59,7 +59,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         return
 
     # Back to admin menu
-    if data == "adm_back_menu":
+    if data in ["adm_back_menu", "adm_dashboard"]:
         text = (
             "⚙️ **لوحة تحكم المسؤول (Admin Dashboard)**\n"
             "─────────────────────\n"
@@ -260,19 +260,24 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             return
 
         text = "⏳ **الطلبات المعلقة قيد الانتظار:**\n─────────────────────\n"
+        buttons = []
         for p in pending:
             text += (
                 f"🔹 **طلب:** `{p['order_code']}`\n"
                 f"• العميل: {p['user_name']} ({p['user_username']})\n"
                 f"• المنتج: {p['product_name']} (الكمية: {p['quantity']})\n"
-                f"• المبلغ: {p['total_price']} {CURRENCY}\n"
+                f"• المبلغ: {p['total_price']} {p.get('currency', CURRENCY)}\n"
                 f"• رقم التحويل: `{p['transfer_number']}`\n"
                 f"• التاريخ: {p['created_at']}\n"
                 f"───────────────\n"
             )
+            buttons.append([
+                InlineKeyboardButton(f"⚙️ إدارة طلب {p['order_code']}", callback_data=f"adm_manage_order:{p['id']}")
+            ])
+        buttons.append([InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="adm_dashboard")])
         await query.message.edit_text(
             text,
-            reply_markup=keyboards.get_admin_menu_keyboard(),
+            reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown",
         )
         return
@@ -505,6 +510,149 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         await query.message.reply_text(text, parse_mode="Markdown")
         return
 
+    # Manage specific pending order from admin panel
+    if data.startswith("adm_manage_order:"):
+        order_id = int(data.split(":")[1])
+        order = await database.get_order_by_id(order_id)
+        if not order:
+            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            return
+
+        status_text = "⏳ معلق قيد الانتظار" if order["status"] == "PENDING" else order["status"]
+        text = (
+            f"📦 **إدارة الطلب رقم `{order['order_code']}`:**\n"
+            f"─────────────────────\n"
+            f"👤 **العميل:** {order['user_name']} (`{order['user_id']}`)\n"
+            f"🛍 **المنتج:** {order['product_name']}\n"
+            f"🔢 **الكمية:** {order['quantity']}\n"
+            f"💰 **المبلغ:** {order['total_price']} {order.get('currency', CURRENCY)}\n"
+            f"💳 **طريقة الدفع:** {order.get('payment_method', 'بريدي موب')}\n"
+            f"🧾 **رقم التحويل:** `{order.get('transfer_number')}`\n"
+            f"📊 **الحالة:** {status_text}\n"
+            f"📅 **التاريخ:** {order['created_at']}\n"
+            f"─────────────────────\n"
+            "اختر الإجراء المطلوب بالأسفل 👇"
+        )
+        kb = [
+            [
+                InlineKeyboardButton("✅ قبول وتسليم تلقائي", callback_data=f"adm_appr:{order_id}"),
+                InlineKeyboardButton("✍️ تسليم يدوي", callback_data=f"adm_manual_deliver:{order_id}"),
+            ],
+            [
+                InlineKeyboardButton("⏳ إشعار: جاري التجهيز", callback_data=f"adm_wait:{order_id}"),
+                InlineKeyboardButton("💬 مراسلة العميل", callback_data=f"adm_msg:{order_id}"),
+            ],
+            [
+                InlineKeyboardButton("❌ رفض الطلب", callback_data=f"adm_rej:{order_id}"),
+                InlineKeyboardButton("🔙 رجوع للطلبات المعلقة", callback_data="adm_pending"),
+            ],
+        ]
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        return
+
+    # Notify Customer: Order In Preparation / Please Wait
+    if data.startswith("adm_wait:"):
+        order_id = int(data.split(":")[1])
+        order = await database.get_order_by_id(order_id)
+        if not order:
+            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            return
+
+        cust_user_id = order["user_id"]
+        order_code = order["order_code"]
+        prod_name = order["product_name"]
+
+        wait_msg = (
+            f"⏳ **مرحباً بك عزيزي العميل!**\n\n"
+            f"📌 بخصوص طلبك رقم: `{order_code}`\n"
+            f"📦 المنتج: **{prod_name}**\n\n"
+            f"🛠 **طلبك قيد التجهيز والتفعيل الآن من قبل إدارة المتجر.**\n"
+            f"نعمل حالياً على تجهيز وشراء اشتراكك لضمان أعلى جودة.\n"
+            f"يرجى الانتظار بضع دقائق وسيصلك رابط وبيانات التفعيل هنا فور الانتهاء مباشرة! 🚀\n\n"
+            f"شاكرين لصبرك وحسن تعاملك معنا! 🌟"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=cust_user_id,
+                text=wait_msg,
+                parse_mode="Markdown",
+            )
+            await query.answer("✅ تم إرسال إشعار 'طلبك قيد التجهيز' للعميل بنجاح!", show_alert=True)
+            await query.message.reply_text(
+                f"⏳ **تم إشعار العميل بنجاح بأن طلبه قيد التجهيز!**\n\n"
+                f"👤 العميل: **{order['user_name']}** (`{cust_user_id}`)\n"
+                f"🔖 الطلب: `{order_code}`\n\n"
+                f"العميل الآن يعلم أن طلبه قيد الشراء والتجهيز. عندما تجهز الرابط/الحساب يمكنك الضغط على **'✍️ تسليم يدوي'** أو **'✅ قبول وتسليم تلقائي'**.",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error(f"Failed to send wait notification to {cust_user_id}: {e}")
+            await query.answer(f"⚠️ تعذر إرسال الإشعار للعميل: {e}", show_alert=True)
+        return
+
+    # Custom Message to Customer for specific order
+    if data.startswith("adm_msg:"):
+        order_id = int(data.split(":")[1])
+        order = await database.get_order_by_id(order_id)
+        if not order:
+            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            return
+
+        context.bot_data[f"admin_custom_msg_{user_id}"] = order_id
+        await query.answer()
+        await query.message.reply_text(
+            f"💬 **مراسلة مخصصة للعميل (طلب `{order['order_code']}`):**\n"
+            f"─────────────────────\n"
+            f"👤 العميل: **{order['user_name']}** (`{order['user_id']}`)\n"
+            f"📦 المنتج: **{order['product_name']}**\n\n"
+            f"✍️ **أرسل الآن نص الرسالة التي تريد توجيهها للعميل:**\n"
+            f"(مثال: 'السلام عليكم، جاري تجهيز اشتراكك نحتاج 15 دقيقة' أو 'يرجى إرسال إيميلك لتفعيل الحساب').\n\n"
+            f"• لإلغاء المراسلة أرسل: `/cancel_action`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Direct Manual Delivery (bypassing APIs)
+    if data.startswith("adm_manual_deliver:"):
+        order_id = int(data.split(":")[1])
+        order = await database.get_order_by_id(order_id)
+        if not order:
+            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            return
+
+        if order["status"] != "PENDING":
+            await query.answer(f"⚠️ هذا الطلب تمت معالجته مسبقاً ({order['status']}).", show_alert=True)
+            return
+
+        context.bot_data[f"admin_manual_order_{user_id}"] = order_id
+        await query.answer()
+        await query.message.reply_text(
+            f"✍️ **تسليم يدوي مباشر للطلب `{order['order_code']}`:**\n"
+            f"─────────────────────\n"
+            f"👤 العميل: **{order['user_name']}** (`{order['user_id']}`)\n"
+            f"📦 المنتج: **{order['product_name']}**\n"
+            f"🔢 الكمية المطلوبة: `{order['quantity']}`\n\n"
+            f"📥 **أرسل الآن رابط أو بيانات الاشتراك في رسالة:**\n"
+            f"(إذا كانت الكمية أكثر من 1، ضع كل رابط في سطر منفصل).\n\n"
+            f"• لإلغاء العملية أرسل: `/cancel_action`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Direct Reply to a Customer User ID
+    if data.startswith("adm_reply_user:"):
+        target_uid = int(data.split(":")[1])
+        context.bot_data[f"admin_reply_user_{user_id}"] = target_uid
+        await query.answer()
+        await query.message.reply_text(
+            f"💬 **كتابة رد مباشر للعميل (`{target_uid}`):**\n\n"
+            f"✍️ أرسل رسالتك الآن في هذه المحادثة وسيتم تسليمها للعميل فوراً.\n"
+            f"• لإلغاء المراسلة: `/cancel_action`",
+            parse_mode="Markdown",
+        )
+        return
+
+
 
 # ==================== معالجة قبول الطلب (Hybrid: Stock -> LahaStore -> AccZone -> Manual) ====================
 
@@ -664,26 +812,43 @@ async def deliver_links_to_customer(
     order: dict,
     links: list[str],
 ):
-    """Sends the activation link(s) to the customer with full instructions and posts channel proof"""
+    """Sends the activation link(s) / credentials to the customer with instructions and posts channel proof"""
     user_id = order["user_id"]
+    product_name = order.get("product_name", "الاشتراك")
+    prod_id = order.get("product_id", "")
 
-    links_formatted = ""
+    items_formatted = ""
     for idx, l in enumerate(links, 1):
-        links_formatted += f"🔗 **رابط التفعيل #{idx}:**\n`{l}`\n\n"
+        is_url = l.startswith("http://") or l.startswith("https://")
+        header = f"🔗 **رابط التفعيل #{idx}:**" if is_url else f"🔑 **بيانات / كود التفعيل #{idx}:**"
+        items_formatted += f"{header}\n`{l}`\n\n"
+
+    # Tailor instructions depending on whether it's Gemini or other digital products
+    if "gemini" in prod_id.lower() or "gemini" in product_name.lower():
+        instructions = (
+            "🌟 **طريقة التفعيل:**\n"
+            "1. قم بفتح رابط التفعيل في المتصفح.\n"
+            "2. سجل الدخول بحساب Google الذي تريد تفعيل اشتراك Gemini Pro عليه.\n"
+            "3. اضغط على تأكيد/قبول التفعيل ومبروك عليك الاشتراك! 🚀\n\n"
+        )
+    else:
+        instructions = (
+            "🌟 **طريقة التفعيل / الاستخدام:**\n"
+            "1. استخدم الرابط أو بيانات الحساب/الكود المرفقة أعلاه لتسجيل الدخول والتفعيل.\n"
+            "2. الاشتراك أصلي ومضمون طوال المدة المحددة بضمان المتجر.\n"
+            "3. إذا احتجت أي مساعدة بالتفعيل يمكنك مراسلتنا هنا مباشرة وسنساعدك فوراً! 🚀\n\n"
+        )
 
     customer_msg = (
         f"🎉 **مبروك! تم تأكيد وقبول عملية الدفع لطلبك بنجاح!**\n"
         f"─────────────────────\n"
         f"🔹 **رقم الطلب:** `{order['order_code']}`\n"
-        f"📦 **المنتج:** {order['product_name']}\n"
+        f"📦 **المنتج:** {product_name}\n"
         f"🔢 **الكمية:** {order['quantity']}\n"
         f"─────────────────────\n\n"
-        f"{links_formatted}"
-        "🌟 **طريقة التفعيل:**\n"
-        "1. قم بفتح رابط التفعيل في المتصفح.\n"
-        "2. سجل الدخول بحساب Google الذي تريد تفعيل اشتراك Gemini Pro عليه.\n"
-        "3. اضغط على تأكيد/قبول التفعيل ومبروك عليك الاشتراك! 🚀\n\n"
-        "شكراً لثقتك بنا! إذا كان لديك أي استفسار يسعدنا دائماً خدمتك."
+        f"{items_formatted}"
+        f"{instructions}"
+        "شكراً لثقتك بنا ونتمنى لك تجربة ممتعة! 🌟"
     )
 
     try:
@@ -722,8 +887,107 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         context.bot_data.pop(f"admin_set_price_{user_id}", None)
         context.bot_data.pop(f"admin_add_prod_step_{user_id}", None)
         context.bot_data.pop(f"admin_set_proof_chan_{user_id}", None)
+        context.bot_data.pop(f"admin_custom_msg_{user_id}", None)
+        context.bot_data.pop(f"admin_reply_user_{user_id}", None)
         await update.message.reply_text("✅ تم إلغاء العملية الحالية.")
         return
+
+    # 0. Awaiting Custom Message for a Customer Order
+    custom_msg_order_id = context.bot_data.get(f"admin_custom_msg_{user_id}")
+    if custom_msg_order_id:
+        order = await database.get_order_by_id(custom_msg_order_id)
+        if not order:
+            context.bot_data.pop(f"admin_custom_msg_{user_id}", None)
+            await update.message.reply_text("⚠️ لم يتم العثور على بيانات الطلب.")
+            return
+
+        cust_uid = order["user_id"]
+        order_code = order["order_code"]
+        cust_msg = (
+            f"📩 **رسالة من إدارة المتجر بخصوص طلبك `{order_code}`:**\n\n"
+            f"{text}\n\n"
+            f"─────────────────\n"
+            f"💬 يمكنك الرد مباشرة على هذه الرسالة إذا طُلب منك أي معلومات أو استفسار."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=cust_uid,
+                text=cust_msg,
+                parse_mode="Markdown",
+            )
+            context.bot_data.pop(f"admin_custom_msg_{user_id}", None)
+            await update.message.reply_text(
+                f"✅ **تم إرسال رسالتك بنجاح للعميل {order['user_name']}!**\n\n"
+                f"📌 **نص الرسالة المرسلة:**\n_{text}_",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ فشل إرسال الرسالة للعميل: {e}")
+        return
+
+    # 0.1 Awaiting Direct Message to a Customer User ID
+    reply_target_uid = context.bot_data.get(f"admin_reply_user_{user_id}")
+    if reply_target_uid:
+        cust_msg = (
+            f"📩 **رسالة من إدارة المتجر:**\n\n"
+            f"{text}\n\n"
+            f"─────────────────\n"
+            f"💬 يمكنك الرد مباشرة على هذه الرسالة."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=reply_target_uid,
+                text=cust_msg,
+                parse_mode="Markdown",
+            )
+            context.bot_data.pop(f"admin_reply_user_{user_id}", None)
+            await update.message.reply_text(
+                f"✅ **تم إرسال الرد إلى العميل (`{reply_target_uid}`) بنجاح!**\n\n"
+                f"📌 **نص الرسالة:**\n_{text}_",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ فشل إرسال الرسالة للعميل: {e}")
+        return
+
+    # 0.2 Smart Telegram Direct Reply: If Admin replied directly to an order/customer message in chat
+    if update.message.reply_to_message:
+        replied_msg = update.message.reply_to_message
+        target_uid = None
+        target_order_code = None
+
+        search_text = (replied_msg.caption or "") + "\n" + (replied_msg.text or "")
+        import re
+        m_id = re.search(r"(?:ID|معرف العميل|معرف العميل \(ID\))[:\s*`]+(\d{5,})", search_text)
+        if m_id:
+            target_uid = int(m_id.group(1))
+
+        m_order = re.search(r"(ORDER[0-9A-Z]+)", search_text)
+        if m_order:
+            target_order_code = m_order.group(1)
+
+        if target_uid and target_uid not in ADMIN_IDS:
+            prefix = f" بخصوص طلبك `{target_order_code}`" if target_order_code else ""
+            cust_msg = (
+                f"📩 **رسالة من إدارة المتجر{prefix}:**\n\n"
+                f"{text}\n\n"
+                f"─────────────────\n"
+                f"💬 يمكنك الرد مباشرة على هذه الرسالة."
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=target_uid,
+                    text=cust_msg,
+                    parse_mode="Markdown",
+                )
+                await update.message.reply_text(
+                    f"✅ **تم تسليم ردك مباشرة إلى العميل (`{target_uid}`)!**",
+                    parse_mode="Markdown",
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed to send direct reply to {target_uid}: {e}")
+
 
     # 1. Awaiting new price for product
     edit_price_pid = context.bot_data.get(f"admin_set_price_{user_id}")

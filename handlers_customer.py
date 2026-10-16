@@ -1,5 +1,5 @@
 import html
-from telegram import Update, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes,
     ConversationHandler,
@@ -490,3 +490,120 @@ async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboards.get_main_menu(update.effective_user.id),
         )
     return ConversationHandler.END
+
+
+# ==================== خدمة ودعم العملاء الواردة (Inbound Customer Support) ====================
+
+async def handle_customer_inbound_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles text messages from customers outside of active order conversations"""
+    user = update.effective_user
+    if not user or user.id in ADMIN_IDS:
+        return
+
+    text = update.message.text.strip()
+    user_id = user.id
+
+    # Check if user has an active or recent order
+    recent_orders = await database.get_user_orders(user_id, limit=1)
+    last_order = recent_orders[0] if recent_orders else None
+
+    order_info = ""
+    reply_buttons = []
+    if last_order:
+        st_emoji = "⏳" if last_order.get("status") == "PENDING" else "✅"
+        order_info = (
+            f"\n🏷 **آخر طلب للعميل:** `{last_order['order_code']}` ({last_order['product_name']}) "
+            f"| الحالة: {st_emoji} {last_order['status']}"
+        )
+        if last_order.get("status") == "PENDING":
+            reply_buttons.append([
+                InlineKeyboardButton("✍️ تسليم الطلب", callback_data=f"adm_manual_deliver:{last_order['id']}"),
+                InlineKeyboardButton("⏳ إشعار بالانتظار", callback_data=f"adm_wait:{last_order['id']}"),
+            ])
+
+    reply_buttons.append([
+        InlineKeyboardButton("💬 الرد على العميل", callback_data=f"adm_reply_user:{user_id}")
+    ])
+
+    admin_keyboard = InlineKeyboardMarkup(reply_buttons)
+    admin_notification = (
+        f"📩 **رسالة جديدة من عميل:**\n"
+        f"─────────────────────\n"
+        f"👤 **العميل:** {html.escape(user.full_name)} "
+        f"({f'@{user.username}' if user.username else 'لا يوجد معرف'})\n"
+        f"🆔 **معرف العميل (ID):** `{user_id}`"
+        f"{order_info}\n\n"
+        f"💬 **نص الرسالة:**\n"
+        f"{html.escape(text)}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_notification,
+                reply_markup=admin_keyboard,
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            print(f"Error forwarding customer message to admin {admin_id}: {e}")
+
+    await update.message.reply_text(
+        "✅ **تم استلام رسالتك وإيصالها لإدارة المتجر بنجاح.**\n"
+        "سيقوم المشرف بالرد عليك هنا في أقرب وقت ممكن. شكراً لتواصلك! 🌟",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_customer_inbound_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles photos sent by customers outside of active order conversations"""
+    user = update.effective_user
+    if not user or user.id in ADMIN_IDS:
+        return
+
+    photo_file_id = update.message.photo[-1].file_id
+    caption = update.message.caption or ""
+    user_id = user.id
+
+    recent_orders = await database.get_user_orders(user_id, limit=1)
+    last_order = recent_orders[0] if recent_orders else None
+
+    order_info = ""
+    reply_buttons = []
+    if last_order and last_order.get("status") == "PENDING":
+        order_info = f"\n🏷 **طلب معلق:** `{last_order['order_code']}` ({last_order['product_name']})"
+        reply_buttons.append([
+            InlineKeyboardButton("✍️ تسليم الطلب", callback_data=f"adm_manual_deliver:{last_order['id']}"),
+        ])
+
+    reply_buttons.append([
+        InlineKeyboardButton("💬 الرد على العميل", callback_data=f"adm_reply_user:{user_id}")
+    ])
+
+    admin_keyboard = InlineKeyboardMarkup(reply_buttons)
+    admin_caption = (
+        f"📷 **صورة واردة من عميل:**\n"
+        f"👤 {html.escape(user.full_name)} ({f'@{user.username}' if user.username else 'لا يوجد معرف'})\n"
+        f"🆔 **معرف العميل (ID):** `{user_id}`"
+        f"{order_info}\n"
+        f"💬 **التعليق:** {html.escape(caption) if caption else '(بدون تعليق)'}"
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_photo(
+                chat_id=admin_id,
+                photo=photo_file_id,
+                caption=admin_caption,
+                reply_markup=admin_keyboard,
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            print(f"Error forwarding customer photo to admin {admin_id}: {e}")
+
+    await update.message.reply_text(
+        "✅ **تم استلام الصورة وإرسالها للإدارة بنجاح.**\n"
+        "شكراً لك، سنرد عليك في أقرب وقت! 🌟",
+        parse_mode="Markdown",
+    )
+
