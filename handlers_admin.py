@@ -396,20 +396,46 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         return
 
 
-    # Check Supplier Balance & Stock (Both LahaStore and AccZone)
+    # Check Supplier Balance & Stock (DigitalCore, LahaStore, and AccZone)
     if data == "adm_supplier":
-        # 1. Primary Supplier: LahaStore
+        # 1. Primary Supplier: DigitalCore
+        dc_bal = await supplier_api.check_digitalcore_balance()
+        dc_stock = await supplier_api.get_digitalcore_stock()
+
+        # 2. Secondary Supplier: LahaStore
         laha_bal = await supplier_api.check_supplier_balance()
         laha_stock = await supplier_api.get_supplier_gemini_stock()
 
-        # 2. Backup Supplier: AccZone
+        # 3. Backup Supplier: AccZone
         acc_bal = await supplier_api.check_acczone_balance()
         acc_stock = await supplier_api.get_acczone_gemini_stock()
 
         text = "🌐 **بيانات ورصيد مزودي الروابط (APIs):**\n─────────────────────\n\n"
-        
+
+        # DigitalCore Section
+        text += "🥇 **1. المورد الرئيسي (DigitalCore API):**\n"
+        if dc_bal.get("ok"):
+            text += (
+                f"• رصيد المحفظة: `{dc_bal.get('balance_text')}`\n"
+                f"• إجمالي الطلبات المنفذة: `{dc_bal.get('total_orders')}` طلب\n"
+            )
+        else:
+            text += f"• حالة الحساب: ⚠️ {dc_bal.get('error')}\n"
+
+        if dc_stock.get("ok"):
+            prods_dc = dc_stock.get("products", [])
+            for p in prods_dc[:7]:
+                p_name = p.get("name", "")
+                p_stock = p.get("stock", 0)
+                p_price = p.get("price", 0.0)
+                text += f"  - {p_name}: `{p_stock}` متوفر (${p_price})\n"
+        else:
+            text += "  - تعذر فحص مخزون DigitalCore.\n"
+
+        text += "\n─────────────────────\n"
+
         # LahaStore Section
-        text += "🥇 **1. المورد الأساسي (LahaStore):**\n"
+        text += "🥈 **2. المورد الثاني (LahaStore API):**\n"
         if laha_bal.get("ok"):
             text += (
                 f"• معرف المتجر: `{laha_bal.get('shop_id')}`\n"
@@ -423,12 +449,12 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             for itm in items:
                 text += f"  - {itm.get('name')}: `{itm.get('stock')}` متوفر (${itm.get('priceUsd')})\n"
         else:
-            text += "  - تعذر فحص مخزون جيميني.\n"
+            text += "  - تعذر فحص مخزون LahaStore.\n"
 
         text += "\n─────────────────────\n"
 
         # AccZone Section
-        text += "🥈 **2. المورد الاحتياطي (AccZone):**\n"
+        text += "🥉 **3. المورد الثالث (AccZone API):**\n"
         if acc_bal.get("ok"):
             text += (
                 f"• المستخدم: `{acc_bal.get('username')}`\n"
@@ -442,15 +468,15 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             for itm in items:
                 text += f"  - {itm.get('name')}: `{itm.get('stock')}` متوفر (${itm.get('price')})\n"
         else:
-            text += "  - تعذر فحص مخزون جيميني.\n"
+            text += "  - تعذر فحص مخزون AccZone.\n"
 
         text += (
             "\n─────────────────────\n"
-            "🔄 **نظام السحب الذكي:**\n"
-            "1. يبحث في المخزن المحلي أولاً.\n"
-            "2. إذا فرغ المخزن، يسحب تلقائياً من **LahaStore**.\n"
-            "3. إذا نفد رصيد أو كمية الأول، يسحب تلقائياً من **AccZone**.\n"
-            "4. إذا تعذر كلاهما، يطلب منك إدخال الرابط يدوياً.\n"
+            "🔄 **نظام السحب والتسليم الذكي:**\n"
+            "1. يبحث في المخزن السحابي المباشر أولاً.\n"
+            "2. إذا فرغ المخزن، يسحب تلقائياً وبأقل تكلفة من **DigitalCore**.\n"
+            "3. كبديل ثانٍ، يسحب تلقائياً من **AccZone** أو **LahaStore**.\n"
+            "4. إذا تعذرت جميع السيرفرات، يطلب منك إدخال الرابط يدوياً.\n"
         )
 
         await query.message.edit_text(

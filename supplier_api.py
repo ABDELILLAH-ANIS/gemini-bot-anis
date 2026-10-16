@@ -1,5 +1,8 @@
 import httpx
 from config import (
+    DIGITALCORE_API_KEY,
+    DIGITALCORE_BASE_URL,
+    DIGITALCORE_PRODUCT_MAP,
     SUPPLIER_API_KEY,
     SUPPLIER_BASE_URL,
     SUPPLIER_PRODUCT_MAP,
@@ -8,8 +11,110 @@ from config import (
     ACCZONE_PRODUCT_MAP,
 )
 
+# Standard browser headers to bypass Cloudflare protection
+DIGITALCORE_HEADERS = {
+    "Api-Key": DIGITALCORE_API_KEY,
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
 
-# ==================== المورد الأول (LahaStore) ====================
+
+# ==================== المورد الأول والرئيسي (DigitalCore) ====================
+
+async def check_digitalcore_balance() -> dict:
+    """Check account balance and order count on DigitalCore"""
+    if not DIGITALCORE_API_KEY:
+        return {"ok": False, "error": "لم يتم ضبط مفتاح DigitalCore API"}
+
+    url = f"{DIGITALCORE_BASE_URL}/api/user/me"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=DIGITALCORE_HEADERS)
+            if resp.status_code == 200:
+                data = resp.json()
+                bal = float(data.get("balance", 0.0))
+                orders = data.get("total_orders", "0")
+                return {
+                    "ok": True,
+                    "balance": bal,
+                    "balance_text": f"${bal:.2f}",
+                    "total_orders": str(orders),
+                }
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def get_digitalcore_stock() -> dict:
+    """Fetch live catalog and stock levels from DigitalCore"""
+    if not DIGITALCORE_API_KEY:
+        return {"ok": False, "error": "لم يتم ضبط مفتاح DigitalCore API"}
+
+    url = f"{DIGITALCORE_BASE_URL}/api/user/products"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=DIGITALCORE_HEADERS)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"ok": True, "products": data}
+            return {"ok": False, "error": f"HTTP {resp.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def purchase_from_digitalcore(
+    local_product_id: str,
+    quantity: int,
+    order_code: str,
+) -> tuple[bool, list[str], str]:
+    """Attempts to buy product via DigitalCore API"""
+    if not DIGITALCORE_API_KEY:
+        return False, [], "مفتاح API المورد DigitalCore غير مضبوط."
+
+    slug = DIGITALCORE_PRODUCT_MAP.get(local_product_id)
+    if not slug:
+        return False, [], f"المنتج {local_product_id} غير مربوط بـ DigitalCore."
+
+    url = f"{DIGITALCORE_BASE_URL}/api/user/buy"
+    headers = {
+        **DIGITALCORE_HEADERS,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "id": slug,
+        "count": quantity,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    items = data.get("items", [])
+                    if items:
+                        order_id_dc = data.get("order_id", "")
+                        return True, items, f"تم شراء الرابط بنجاح من DigitalCore (طلب رقم {order_id_dc})."
+                    return False, [], "تمت العملية لكن لم يتم استلام أي رابط في الرد."
+                else:
+                    msg = data.get("msg", "فشلت العملية")
+                    if msg == "OUT_OF_STOCK":
+                        msg = "المنتج غير متوفر حالياً في مخزن DigitalCore."
+                    elif msg == "INSUFFICIENT_BALANCE":
+                        msg = "رصيد المحفظة لدى DigitalCore غير كافٍ لإتمام الطلب."
+                    return False, [], f"DigitalCore: {msg}"
+            else:
+                try:
+                    err_json = resp.json()
+                    msg = err_json.get("msg", resp.text)
+                except Exception:
+                    msg = resp.text
+                return False, [], f"DigitalCore HTTP {resp.status_code}: {msg}"
+    except Exception as e:
+        return False, [], f"فشل الاتصال بـ DigitalCore: {str(e)}"
+
+
+# ==================== المورد الثاني (LahaStore) ====================
 
 async def check_supplier_balance() -> dict:
     """Check current wallet balance on LahaStore"""
@@ -110,7 +215,7 @@ async def purchase_from_supplier(
         return False, [], f"فشل الاتصال بـ LahaStore: {str(e)}"
 
 
-# ==================== المورد الثاني الاحتياطي (AccZone) ====================
+# ==================== المورد الثالث الاحتياطي (AccZone) ====================
 
 async def check_acczone_balance() -> dict:
     """Check current wallet balance on AccZone"""
@@ -207,40 +312,38 @@ async def purchase_with_fallback(
     order_code: str,
 ) -> tuple[bool, list[str], str, str]:
     """
-    Smart Multi-Supplier Routing:
-    - Products available on AccZone with lower cost (Gemini, Duolingo, Adobe, Apple Music) try AccZone first.
-    - Products on LahaStore (ChatGPT, Codex, Claude, CapCut) try LahaStore first.
-    - Seamless fallback between both suppliers if supported.
+    Smart Multi-Supplier Routing (DigitalCore -> AccZone -> LahaStore):
+    1. Try DigitalCore first (huge stock, best wholesale prices, sub-millisecond execution).
+    2. Fallback to AccZone if supported.
+    3. Fallback to LahaStore if supported.
     """
+    has_dc = local_product_id in DIGITALCORE_PRODUCT_MAP
     has_acczone = local_product_id in ACCZONE_PRODUCT_MAP
     has_laha = local_product_id in SUPPLIER_PRODUCT_MAP
 
-    # If product is primarily on AccZone
-    if has_acczone and not has_laha:
-        acc_ok, acc_links, acc_msg = await purchase_from_acczone(local_product_id, quantity)
-        return acc_ok, acc_links, acc_msg, ("AccZone" if acc_ok else "None")
+    errors = []
 
-    # If product is primarily on LahaStore
-    if has_laha and not has_acczone:
-        laha_ok, laha_links, laha_msg = await purchase_from_supplier(local_product_id, quantity, order_code)
-        return laha_ok, laha_links, laha_msg, ("LahaStore" if laha_ok else "None")
+    # 1. First priority: DigitalCore
+    if has_dc:
+        dc_ok, dc_links, dc_msg = await purchase_from_digitalcore(local_product_id, quantity, order_code)
+        if dc_ok and dc_links:
+            return True, dc_links, dc_msg, "DigitalCore"
+        errors.append(f"DigitalCore: {dc_msg}")
 
-    # If product is available on BOTH (e.g. Gemini, Duolingo), prefer AccZone (cheaper) then LahaStore
+    # 2. Second priority: AccZone
     if has_acczone:
         acc_ok, acc_links, acc_msg = await purchase_from_acczone(local_product_id, quantity)
         if acc_ok and acc_links:
             return True, acc_links, acc_msg, "AccZone"
-    else:
-        acc_msg = "غير متاح"
+        errors.append(f"AccZone: {acc_msg}")
 
+    # 3. Third priority: LahaStore
     if has_laha:
         laha_ok, laha_links, laha_msg = await purchase_from_supplier(local_product_id, quantity, order_code)
         if laha_ok and laha_links:
             return True, laha_links, laha_msg, "LahaStore"
-    else:
-        laha_msg = "غير متاح"
+        errors.append(f"LahaStore: {laha_msg}")
 
-    # Both failed
-    combined_msg = f"AccZone: {acc_msg} | LahaStore: {laha_msg}"
+    # All attempted suppliers failed
+    combined_msg = " | ".join(errors) if errors else "المنتج غير مربوط بأي مزود API."
     return False, [], combined_msg, "None"
-
