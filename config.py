@@ -93,3 +93,7 @@ DEFAULT_PAYMENT_INFO = os.getenv(
     "PAYMENT_INFO",
     PAYMENT_METHODS["baridimob"]["details"],
 )
+
+# Proofs Channel Username or ID (e.g. @my_proofs_channel or -100xxxxxxxxxx)
+PROOF_CHANNEL = os.getenv("PROOF_CHANNEL", "").strip()
+

@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 import aiosqlite
 import datetime
-from config import DB_PATH, DEFAULT_PAYMENT_INFO
+from config import DB_PATH, DEFAULT_PAYMENT_INFO, PROOF_CHANNEL
 
 
 @asynccontextmanager
@@ -386,3 +386,24 @@ async def update_payment_info(new_info: str):
             (new_info,),
         )
         await db.commit()
+
+
+async def get_proof_channel() -> str:
+    """Fetch configured proofs channel (username like @channel or chat_id)"""
+    async with get_db() as db:
+        cur = await db.execute("SELECT value FROM settings WHERE key = 'proof_channel'")
+        row = await cur.fetchone()
+        if row and row["value"]:
+            return row["value"].strip()
+    return PROOF_CHANNEL.strip() if PROOF_CHANNEL else ""
+
+
+async def update_proof_channel(new_channel: str):
+    """Save or update configured proofs channel"""
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('proof_channel', ?)",
+            (new_channel.strip(),),
+        )
+        await db.commit()
+

@@ -102,12 +102,26 @@ def get_admin_menu_keyboard():
         ],
         [
             InlineKeyboardButton("💳 تعديل بيانات الدفع", callback_data="adm_edit_payment"),
+            InlineKeyboardButton("📢 قناة الإثباتات", callback_data="adm_proof_channel"),
         ],
         [
             InlineKeyboardButton("🔙 إغلاق اللوحة", callback_data="adm_close"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def get_admin_proof_channel_keyboard(has_channel: bool = False):
+    """Keyboard for managing Proofs Channel"""
+    keyboard = [
+        [InlineKeyboardButton("✏️ ضبط / تغيير معرف القناة", callback_data="adm_set_proof_channel")],
+    ]
+    if has_channel:
+        keyboard.append([InlineKeyboardButton("🧪 إرسال منشور تجريبي للقناة", callback_data="adm_test_proof_channel")])
+        keyboard.append([InlineKeyboardButton("🗑️ إلغاء ربط القناة", callback_data="adm_remove_proof_channel")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع للوحة الرئيسية", callback_data="adm_back_menu")])
+    return InlineKeyboardMarkup(keyboard)
+
 
 
 def get_admin_products_management_keyboard():

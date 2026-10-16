@@ -1,5 +1,7 @@
 import html
-from telegram import Update
+import datetime
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes,
     CommandHandler,
@@ -11,6 +13,8 @@ from config import ADMIN_IDS, PRODUCTS, CURRENCY, SUPPLIER_SHOP_ID
 import database
 import keyboards
 import supplier_api
+
+logger = logging.getLogger(__name__)
 
 
 def is_admin(user_id: int) -> bool:
@@ -256,6 +260,84 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         await query.message.edit_text(text, parse_mode="Markdown")
         return
 
+    # Proof Channel Dashboard
+    if data == "adm_proof_channel":
+        curr_chan = await database.get_proof_channel()
+        has_chan = bool(curr_chan)
+        chan_display = f"`{curr_chan}`" if has_chan else "❌ _غير مضبوطة حالياً_"
+        text = (
+            "📢 **إدارة قناة إثباتات المبيعات (Proofs Channel):**\n"
+            "─────────────────────\n"
+            f"• **القناة الحالية:** {chan_display}\n\n"
+            "💡 **كيف تعمل؟**\n"
+            "بمجرد قبول أي طلب للزبائن (سواء تلقائياً عبر API أو يدوياً)، سيقوم البوت بنشر إثبات تسليم فوري في قناتك مع حماية خصوصية العميل، لتعزيز الثقة وجلب زبائن جدد!\n\n"
+            "⚠️ **مهم جداً:**\n"
+            "يجب إضافة البوت كمشرف (Admin) داخل القناة مع منح صلاحية **نشر الرسائل (Post Messages)** لتتمكن من النشر."
+        )
+        await query.message.edit_text(
+            text,
+            reply_markup=keyboards.get_admin_proof_channel_keyboard(has_channel=has_chan),
+            parse_mode="Markdown",
+        )
+        return
+
+    # Set Proof Channel Prompt
+    if data == "adm_set_proof_channel":
+        context.bot_data[f"admin_set_proof_chan_{user_id}"] = True
+        text = (
+            "✏️ **ضبط قناة الإثباتات:**\n\n"
+            "✍️ أرسل معرف القناة الآن:\n"
+            "• إذا كانت القناة عامة (Public)، أرسل المعرف مثل: `@my_proofs_channel`\n"
+            "• إذا كانت القناة خاصة (Private)، أرسل المعرف الرقمي مثل: `-1001234567890`\n\n"
+            "⚠️ تأكد من إضافة البوت كمشرف (Admin) داخل القناة أولاً!\n"
+            "للإلغاء أرسل: `/cancel_action`"
+        )
+        await query.message.edit_text(text, parse_mode="Markdown")
+        return
+
+    # Test Proof Channel
+    if data == "adm_test_proof_channel":
+        curr_chan = await database.get_proof_channel()
+        if not curr_chan:
+            await query.answer("⚠️ لا توجد قناة مضبوطة حالياً.", show_alert=True)
+            return
+
+        try:
+            bot_me = await context.bot.get_me()
+            test_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤖 تجربة زر البوت", url=f"https://t.me/{bot_me.username}")]
+            ]) if bot_me.username else None
+
+            chat_id_target = int(curr_chan) if (curr_chan.startswith("-") and curr_chan[1:].isdigit()) else curr_chan
+            await context.bot.send_message(
+                chat_id=chat_id_target,
+                text="🧪 **منشور تجريبي لقناة الإثباتات:**\nتم ربط البوت بالقناة بنجاح! سيتم نشر عمليات البيع الناجحة هنا تلقائياً لتوثيق الطلبات ✅",
+                reply_markup=test_markup,
+                parse_mode="Markdown",
+            )
+            await query.answer("✅ تم إرسال رسالة تجريبية بنجاح إلى قناتك!", show_alert=True)
+        except Exception as e:
+            await query.answer(f"⚠️ فشل الإرسال للقناة: {e}\nتأكد أن البوت مشرف (Admin) في القناة!", show_alert=True)
+        return
+
+    # Remove Proof Channel
+    if data == "adm_remove_proof_channel":
+        await database.update_proof_channel("")
+        await query.answer("🗑️ تم إلغاء ربط القناة.", show_alert=False)
+        text = (
+            "📢 **إدارة قناة إثباتات المبيعات (Proofs Channel):**\n"
+            "─────────────────────\n"
+            "• **القناة الحالية:** ❌ _تم إلغاء الربط_\n\n"
+            "تم إيقاف النشر التلقائي للطلبات في القناة."
+        )
+        await query.message.edit_text(
+            text,
+            reply_markup=keyboards.get_admin_proof_channel_keyboard(has_channel=False),
+            parse_mode="Markdown",
+        )
+        return
+
+
     # Check Supplier Balance & Stock (Both LahaStore and AccZone)
     if data == "adm_supplier":
         # 1. Primary Supplier: LahaStore
@@ -437,12 +519,98 @@ async def process_order_approval(
     await query.answer("⚠️ يرجى إدخال الرابط يدوياً (المخازن والموردين غير متاحين حالياً).", show_alert=True)
 
 
+def mask_customer_info(name: str, username: str, user_id: int) -> str:
+    """Masks sensitive customer personal info for public proofs channel"""
+    parts = []
+    if name:
+        clean_name = name.strip()
+        if len(clean_name) <= 2:
+            parts.append(clean_name[0] + "*")
+        else:
+            parts.append(f"{clean_name[0]}{'*' * min(3, len(clean_name)-2)}{clean_name[-1]}")
+
+    if username:
+        u = username.lstrip("@").strip()
+        if len(u) <= 2:
+            parts.append(f"(@{u[0]}*)")
+        else:
+            parts.append(f"(@{u[0]}{'*' * min(3, len(u)-2)}{u[-1]})")
+    elif user_id:
+        uid_str = str(user_id)
+        if len(uid_str) > 4:
+            parts.append(f"({uid_str[:4]}****)")
+
+    return " ".join(parts) if parts else "عميل مميز ⭐"
+
+
+async def post_order_proof_to_channel(context: ContextTypes.DEFAULT_TYPE, order: dict):
+    """Broadcasts a clean, privacy-masked proof of completed order to public proof channel"""
+    channel = await database.get_proof_channel()
+    if not channel:
+        return
+
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    masked_cust = mask_customer_info(
+        order.get("user_name", ""),
+        order.get("user_username", ""),
+        order.get("user_id", 0),
+    )
+
+    currency = order.get("currency", CURRENCY)
+    price_val = order.get("total_price", 0)
+    payment_method = order.get("payment_method", "بريدي موب")
+    product_name = order.get("product_name", "اشتراك Google AI Pro")
+    quantity = order.get("quantity", 1)
+    order_code = order.get("order_code", "ORD")
+
+    bot_username = ""
+    try:
+        bot_user = await context.bot.get_me()
+        bot_username = bot_user.username or ""
+    except Exception:
+        pass
+
+    proof_text = (
+        "🛍️ **عملية تسليم وتفعيل ناجحة! ✅**\n"
+        "─────────────────────\n"
+        f"📦 **المنتج:** {product_name}\n"
+        f"🔢 **الكمية:** {quantity}\n"
+        f"💳 **طريقة الدفع:** {payment_method}\n"
+        f"💰 **المبلغ:** `{price_val}` {currency}\n"
+        f"👤 **العميل:** {masked_cust}\n"
+        f"🆔 **رقم الطلب:** `#{order_code}`\n"
+        f"🕒 **التاريخ:** {now_str}\n"
+        "─────────────────────\n"
+        "⚡️ **الحالة:** تم تسليم رابط التفعيل الرسمي للعميل بنجاح 🚀\n"
+        "💎 نسعد دائماً بثقتكم واختياركم لنا!\n\n"
+        "👇 **لطلب اشتراكك الخاص فوراً عبر البوت:**"
+    )
+
+    reply_markup = None
+    if bot_username:
+        reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤖 اطلب اشتراكك الآن من البوت", url=f"https://t.me/{bot_username}")]
+        ])
+
+    try:
+        chat_id_target = int(channel) if (channel.startswith("-") and channel[1:].isdigit()) else channel
+        await context.bot.send_message(
+            chat_id=chat_id_target,
+            text=proof_text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown",
+        )
+        logger.info(f"Proof posted to channel {channel} for order {order_code}")
+    except Exception as e:
+        logger.warning(f"Could not post proof to channel {channel}: {e}")
+
+
 async def deliver_links_to_customer(
     context: ContextTypes.DEFAULT_TYPE,
     order: dict,
     links: list[str],
 ):
-    """Sends the activation link(s) to the customer with full instructions"""
+    """Sends the activation link(s) to the customer with full instructions and posts channel proof"""
     user_id = order["user_id"]
 
     links_formatted = ""
@@ -471,7 +639,14 @@ async def deliver_links_to_customer(
             parse_mode="Markdown",
         )
     except Exception as e:
-        print(f"Failed to deliver links to user {user_id}: {e}")
+        logger.error(f"Failed to deliver links to user {user_id}: {e}")
+
+    # Post proof to public channel
+    try:
+        await post_order_proof_to_channel(context, order)
+    except Exception as e:
+        logger.warning(f"Error posting proof to channel: {e}")
+
 
 
 # ==================== معالج النصوص الخاصة بالمسؤول ====================
@@ -492,6 +667,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         context.bot_data.pop(f"admin_edit_pay_{user_id}", None)
         context.bot_data.pop(f"admin_set_price_{user_id}", None)
         context.bot_data.pop(f"admin_add_prod_step_{user_id}", None)
+        context.bot_data.pop(f"admin_set_proof_chan_{user_id}", None)
         await update.message.reply_text("✅ تم إلغاء العملية الحالية.")
         return
 
@@ -657,3 +833,36 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             parse_mode="Markdown",
         )
         return
+
+    # 7. Editing proof channel
+    if context.bot_data.get(f"admin_set_proof_chan_{user_id}"):
+        clean_chan = text.strip()
+        if not (clean_chan.startswith("@") or clean_chan.startswith("-")):
+            await update.message.reply_text(
+                "⚠️ صيغة المعرف غير صحيحة.\n"
+                "• للقنوات العامة: يجب أن يبدأ بـ `@` (مثال: `@my_channel`)\n"
+                "• للقنوات الخاصة: يجب أن يبدأ برقم القناة (مثال: `-1001234567890`)\n\n"
+                "أعد المحاولة أو أرسل `/cancel_action` للإلغاء."
+            )
+            return
+
+        await database.update_proof_channel(clean_chan)
+        context.bot_data.pop(f"admin_set_proof_chan_{user_id}", None)
+
+        title_info = ""
+        try:
+            chat_id_target = int(clean_chan) if (clean_chan.startswith("-") and clean_chan[1:].isdigit()) else clean_chan
+            chat_obj = await context.bot.get_chat(chat_id_target)
+            title = chat_obj.title or clean_chan
+            title_info = f"\n📢 اسم القناة: **{title}**"
+        except Exception as e:
+            title_info = f"\n⚠️ تذكير: تأكد من إضافة البوت كمشرف (Admin) في القناة بصلاحية نشر الرسائل لكي يتمكن من إرسال الإثباتات."
+
+        await update.message.reply_text(
+            f"✅ **تم ضبط قناة إثباتات المبيعات بنجاح!**\n"
+            f"القناة: `{clean_chan}`{title_info}\n\n"
+            "سيتم الآن إرسال إثباتات الطلبات الناجحة تلقائياً في هذه القناة لزيادة ثقة الزبائن! 🚀",
+            parse_mode="Markdown",
+        )
+        return
+
