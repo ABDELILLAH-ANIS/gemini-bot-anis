@@ -297,9 +297,10 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Test Proof Channel
     if data == "adm_test_proof_channel":
+        await query.answer()
         curr_chan = await database.get_proof_channel()
         if not curr_chan:
-            await query.answer("⚠️ لا توجد قناة مضبوطة حالياً.", show_alert=True)
+            await query.message.reply_text("⚠️ لا توجد قناة مضبوطة حالياً. يرجى ضبط القناة أولاً بالضغط على '✏️ ضبط / تغيير معرف القناة'.")
             return
 
         try:
@@ -315,9 +316,27 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
                 reply_markup=test_markup,
                 parse_mode="Markdown",
             )
-            await query.answer("✅ تم إرسال رسالة تجريبية بنجاح إلى قناتك!", show_alert=True)
+            await query.message.reply_text(
+                f"✅ **تم إرسال المنشور التجريبي بنجاح إلى القناة `{curr_chan}`!**\nتفضل بزيارة قناتك وستجد الرسالة منشورة الآن 🎉",
+                parse_mode="Markdown",
+            )
         except Exception as e:
-            await query.answer(f"⚠️ فشل الإرسال للقناة: {e}\nتأكد أن البوت مشرف (Admin) في القناة!", show_alert=True)
+            err_msg = str(e)
+            logger.error(f"Failed to send test proof to {curr_chan}: {e}")
+            advice = ""
+            if "Chat not found" in err_msg:
+                advice = "💡 **السبب المحتمل:** معرف القناة غير صحيح، أو القناة خاصة. إذا كانت القناة خاصة، يجب استخدام الـ ID الرقمي (مثال: `-100...`)."
+            elif "bot is not a member" in err_msg or "administrator" in err_msg.lower():
+                advice = "💡 **السبب المحتمل:** البوت ليس مضافاً داخل القناة كـ **مشرف (Administrator)**. توجه للقناة وأضف البوت مشرفاً مع صلاحية نشر الرسائل."
+            elif "rights to send a message" in err_msg:
+                advice = "💡 **السبب المحتمل:** البوت موجود بالقناة ولكنه لا يملك صلاحية نشر الرسائل (Post Messages)."
+
+            await query.message.reply_text(
+                f"⚠️ **تعذر إرسال المنشور التجريبي إلى القناة `{curr_chan}`!**\n\n"
+                f"❌ **رسالة الخطأ من تليجرام:**\n`{err_msg}`\n\n"
+                f"{advice}",
+                parse_mode="Markdown",
+            )
         return
 
     # Remove Proof Channel
@@ -837,14 +856,19 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
     # 7. Editing proof channel
     if context.bot_data.get(f"admin_set_proof_chan_{user_id}"):
         clean_chan = text.strip()
-        if not (clean_chan.startswith("@") or clean_chan.startswith("-")):
-            await update.message.reply_text(
-                "⚠️ صيغة المعرف غير صحيحة.\n"
-                "• للقنوات العامة: يجب أن يبدأ بـ `@` (مثال: `@my_channel`)\n"
-                "• للقنوات الخاصة: يجب أن يبدأ برقم القناة (مثال: `-1001234567890`)\n\n"
-                "أعد المحاولة أو أرسل `/cancel_action` للإلغاء."
-            )
-            return
+
+        # Handle t.me links
+        if "t.me/" in clean_chan:
+            clean_chan = clean_chan.split("t.me/")[-1].strip().split("?")[0].strip()
+            if not clean_chan.startswith("+") and not clean_chan.startswith("joinchat/"):
+                clean_chan = f"@{clean_chan.lstrip('@')}"
+
+        # Handle raw numbers vs usernames
+        if not clean_chan.startswith("@") and not clean_chan.startswith("-"):
+            if clean_chan.isdigit():
+                clean_chan = f"-{clean_chan}" if clean_chan.startswith("100") else f"-100{clean_chan}"
+            elif not clean_chan.startswith("+"):
+                clean_chan = f"@{clean_chan}"
 
         await database.update_proof_channel(clean_chan)
         context.bot_data.pop(f"admin_set_proof_chan_{user_id}", None)
@@ -861,7 +885,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(
             f"✅ **تم ضبط قناة إثباتات المبيعات بنجاح!**\n"
             f"القناة: `{clean_chan}`{title_info}\n\n"
-            "سيتم الآن إرسال إثباتات الطلبات الناجحة تلقائياً في هذه القناة لزيادة ثقة الزبائن! 🚀",
+            "اضغط الآن على **'🧪 إرسال منشور تجريبي للقناة'** من لوحة التحكم للتأكد من وصول الرسائل! 🚀",
             parse_mode="Markdown",
         )
         return
