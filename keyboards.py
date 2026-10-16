@@ -18,17 +18,29 @@ def get_main_menu(user_id: int):
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 
-def get_products_keyboard(products: dict):
+def get_categories_keyboard():
+    """Inline keyboard for choosing product category: Gemini, ChatGPT, Other"""
+    keyboard = [
+        [InlineKeyboardButton("💎 Google Gemini AI", callback_data="cat:gemini")],
+        [InlineKeyboardButton("🤖 ChatGPT & OpenAI", callback_data="cat:chatgpt")],
+        [InlineKeyboardButton("🛍️ منتجات وخدمات أخرى", callback_data="cat:other")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_order")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_products_keyboard(products: dict, category: str = "gemini"):
     """Inline keyboard for selecting a subscription plan dynamically from DB"""
     keyboard = []
     for pid, prod in products.items():
-        text = f"💎 {prod['name']} — {prod['price']} {CURRENCY}"
+        text = f"{prod['name']} — {prod['price']} {CURRENCY}"
         keyboard.append([InlineKeyboardButton(text, callback_data=f"prod:{pid}")])
+    keyboard.append([InlineKeyboardButton("🔙 رجوع للأقسام", callback_data="back_to_categories")])
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel_order")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_quantity_keyboard(product_id: str):
+def get_quantity_keyboard(product_id: str, category: str = "gemini"):
     """Inline keyboard for selecting quantity"""
     keyboard = [
         [
@@ -41,18 +53,19 @@ def get_quantity_keyboard(product_id: str):
             InlineKeyboardButton("5", callback_data=f"qty:{product_id}:5"),
             InlineKeyboardButton("10", callback_data=f"qty:{product_id}:10"),
         ],
-        [InlineKeyboardButton("🔙 رجوع لاختيار الباقة", callback_data="back_to_products")],
+        [InlineKeyboardButton("🔙 رجوع للمنتجات", callback_data=f"cat:{category}")],
         [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_order")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_payment_methods_keyboard(product_id: str, quantity: int):
+def get_payment_methods_keyboard(product_id: str, quantity: int, price_usd: float = 2.5):
     """Inline keyboard for choosing payment method: BaridiMob, RedotPay, Bybit"""
+    total_usd = round(price_usd * quantity, 2)
     keyboard = [
         [InlineKeyboardButton("🏦 بريدي موب (BaridiMob)", callback_data=f"paym:{product_id}:{quantity}:baridimob")],
-        [InlineKeyboardButton("💳 RedotPay (2.5$)", callback_data=f"paym:{product_id}:{quantity}:redotpay")],
-        [InlineKeyboardButton("🟡 Bybit (2.5$)", callback_data=f"paym:{product_id}:{quantity}:bybit")],
+        [InlineKeyboardButton(f"💳 RedotPay ({total_usd}$)", callback_data=f"paym:{product_id}:{quantity}:redotpay")],
+        [InlineKeyboardButton(f"🟡 Bybit ({total_usd}$)", callback_data=f"paym:{product_id}:{quantity}:bybit")],
         [InlineKeyboardButton("🔙 رجوع لتحديد الكمية", callback_data=f"prod:{product_id}")],
         [InlineKeyboardButton("❌ إلغاء الطلب", callback_data="cancel_order")],
     ]

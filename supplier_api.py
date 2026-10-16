@@ -163,7 +163,10 @@ async def purchase_from_acczone(
     if not ACCZONE_API_KEY:
         return False, [], "مفتاح API المورد AccZone غير مضبوط."
 
-    service_key = ACCZONE_PRODUCT_MAP.get(local_product_id, "geminilive")
+    service_key = ACCZONE_PRODUCT_MAP.get(local_product_id)
+    if not service_key:
+        return False, [], f"المنتج {local_product_id} غير متوفر لدى AccZone."
+
     url = f"{ACCZONE_BASE_URL}/buyCpn"
     params = {
         "apikey": ACCZONE_API_KEY,
@@ -204,27 +207,40 @@ async def purchase_with_fallback(
     order_code: str,
 ) -> tuple[bool, list[str], str, str]:
     """
-    1. Try Primary Supplier (LahaStore)
-    2. If fails/out-of-stock/insufficient balance, try Backup Supplier (AccZone)
-    Returns: (success: bool, links: list[str], message: str, provider_used: str)
+    Smart Multi-Supplier Routing:
+    - Products available on AccZone with lower cost (Gemini, Duolingo, Adobe, Apple Music) try AccZone first.
+    - Products on LahaStore (ChatGPT, Codex, Claude, CapCut) try LahaStore first.
+    - Seamless fallback between both suppliers if supported.
     """
-    # Try 1: LahaStore
-    laha_ok, laha_links, laha_msg = await purchase_from_supplier(
-        local_product_id=local_product_id,
-        quantity=quantity,
-        order_code=order_code,
-    )
-    if laha_ok and laha_links:
-        return True, laha_links, laha_msg, "LahaStore"
+    has_acczone = local_product_id in ACCZONE_PRODUCT_MAP
+    has_laha = local_product_id in SUPPLIER_PRODUCT_MAP
 
-    # Try 2: AccZone (Backup)
-    acc_ok, acc_links, acc_msg = await purchase_from_acczone(
-        local_product_id=local_product_id,
-        quantity=quantity,
-    )
-    if acc_ok and acc_links:
-        return True, acc_links, acc_msg, "AccZone"
+    # If product is primarily on AccZone
+    if has_acczone and not has_laha:
+        acc_ok, acc_links, acc_msg = await purchase_from_acczone(local_product_id, quantity)
+        return acc_ok, acc_links, acc_msg, ("AccZone" if acc_ok else "None")
+
+    # If product is primarily on LahaStore
+    if has_laha and not has_acczone:
+        laha_ok, laha_links, laha_msg = await purchase_from_supplier(local_product_id, quantity, order_code)
+        return laha_ok, laha_links, laha_msg, ("LahaStore" if laha_ok else "None")
+
+    # If product is available on BOTH (e.g. Gemini, Duolingo), prefer AccZone (cheaper) then LahaStore
+    if has_acczone:
+        acc_ok, acc_links, acc_msg = await purchase_from_acczone(local_product_id, quantity)
+        if acc_ok and acc_links:
+            return True, acc_links, acc_msg, "AccZone"
+    else:
+        acc_msg = "غير متاح"
+
+    if has_laha:
+        laha_ok, laha_links, laha_msg = await purchase_from_supplier(local_product_id, quantity, order_code)
+        if laha_ok and laha_links:
+            return True, laha_links, laha_msg, "LahaStore"
+    else:
+        laha_msg = "غير متاح"
 
     # Both failed
-    combined_msg = f"LahaStore: {laha_msg} | AccZone: {acc_msg}"
+    combined_msg = f"AccZone: {acc_msg} | LahaStore: {laha_msg}"
     return False, [], combined_msg, "None"
+

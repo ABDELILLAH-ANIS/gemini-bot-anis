@@ -95,20 +95,61 @@ async def my_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== تدفق طلب الشراء (Order Flow) ====================
 
 async def buy_subscription_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point for buying subscription"""
+    """Entry point: Show product categories (Gemini, ChatGPT, Other)"""
     context.user_data.pop("order_draft", None)
-    products = await database.get_all_products(only_active=True)
-    if not products:
-        await update.message.reply_text("⚠️ عذراً، لا توجد منتجات متاحة للشراء حالياً.")
-        return ConversationHandler.END
+    text = (
+        "🛍️ **اختر القسم الذي تريده:**\n\n"
+        "🔹 اختر قسماً من الأقسام التالية لعرض الاشتراكات والمنتجات المتاحة:"
+    )
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.edit_text(
+            text,
+            reply_markup=keyboards.get_categories_keyboard(),
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=keyboards.get_categories_keyboard(),
+            parse_mode="Markdown",
+        )
+    return SELECTING_PRODUCT
 
-    text = "🛍️ **اختر باقة الاشتراك المناسبة لك:**"
-    await update.message.reply_text(
+
+async def category_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle choosing a category: 'gemini', 'chatgpt', 'other'"""
+    query = update.callback_query
+    await query.answer()
+
+    cat = query.data.split(":")[1]
+    products = await database.get_products_by_category(cat, only_active=True)
+
+    cat_titles = {
+        "gemini": "💎 **اشتراكات Google Gemini AI:**",
+        "chatgpt": "🤖 **اشتراكات ChatGPT & OpenAI:**",
+        "other": "🛍️ **المنتجات والخدمات الأخرى:**",
+    }
+    title = cat_titles.get(cat, "🛍️ **قائمة المنتجات:**")
+
+    if not products:
+        text = f"{title}\n\n⚠️ عذراً، لا توجد منتجات متوفرة في هذا القسم حالياً."
+    else:
+        text = f"{title}\nاختر الباقة المناسبة لك:"
+
+    await query.message.edit_text(
         text,
-        reply_markup=keyboards.get_products_keyboard(products),
+        reply_markup=keyboards.get_products_keyboard(products, category=cat),
         parse_mode="Markdown",
     )
     return SELECTING_PRODUCT
+
+
+async def back_to_categories_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Return to category selection"""
+    query = update.callback_query
+    await query.answer()
+    return await buy_subscription_entry(update, context)
 
 
 async def product_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,35 +168,42 @@ async def product_selected_callback(update: Update, context: ContextTypes.DEFAUL
         await query.message.edit_text("⚠️ عذراً، هذا المنتج غير متوفر حالياً.")
         return ConversationHandler.END
 
+    cat = product.get("category", "other")
+    price_usd = product.get("price_usd", 2.5)
+
     # Save to draft
     context.user_data["order_draft"] = {
         "product_id": product_id,
         "product_name": product["name"],
         "price": product["price"],
+        "price_usd": price_usd,
+        "category": cat,
     }
 
     text = (
         f"💎 **لقد اخترت:** {product['name']}\n"
-        f"💵 **السعر للحبة:** {product['price']} {CURRENCY}\n"
+        f"💵 **السعر:** {product['price']} {CURRENCY}\n"
         f"📝 {product['description']}\n\n"
         "🔢 **الرجاء تحديد الكمية المطلوبة:**"
     )
     await query.message.edit_text(
         text,
-        reply_markup=keyboards.get_quantity_keyboard(product_id),
+        reply_markup=keyboards.get_quantity_keyboard(product_id, category=cat),
         parse_mode="Markdown",
     )
     return SELECTING_QUANTITY
 
 
 async def back_to_products_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Go back to product list"""
+    """Go back to product list for the category"""
     query = update.callback_query
     await query.answer()
-    products = await database.get_all_products(only_active=True)
+    parts = query.data.split(":")
+    cat = parts[1] if len(parts) > 1 else "gemini"
+    products = await database.get_products_by_category(cat, only_active=True)
     await query.message.edit_text(
         "🛍️ **اختر باقة الاشتراك المناسبة لك:**",
-        reply_markup=keyboards.get_products_keyboard(products),
+        reply_markup=keyboards.get_products_keyboard(products, category=cat),
         parse_mode="Markdown",
     )
     return SELECTING_PRODUCT
@@ -180,10 +228,13 @@ async def quantity_selected_callback(update: Update, context: ContextTypes.DEFAU
             "product_id": product_id,
             "product_name": product["name"],
             "price": product["price"],
+            "price_usd": product.get("price_usd", 2.5),
+            "category": product.get("category", "other"),
         }
 
     draft["quantity"] = quantity
     context.user_data["order_draft"] = draft
+    price_usd = draft.get("price_usd", 2.5)
 
     text = (
         f"📦 **المنتج:** {draft['product_name']}\n"
@@ -192,7 +243,7 @@ async def quantity_selected_callback(update: Update, context: ContextTypes.DEFAU
     )
     await query.message.edit_text(
         text,
-        reply_markup=keyboards.get_payment_methods_keyboard(product_id, quantity),
+        reply_markup=keyboards.get_payment_methods_keyboard(product_id, quantity, price_usd=price_usd),
         parse_mode="Markdown",
     )
     return SELECTING_PAYMENT
@@ -216,8 +267,8 @@ async def payment_method_selected_callback(update: Update, context: ContextTypes
         currency = "دينار"
         instructions = await database.get_payment_info()
     else:
-        # RedotPay or Bybit: 2.5$ each
-        price_usd = method.get("price_usd", 2.5)
+        # RedotPay or Bybit: dynamic price_usd per product
+        price_usd = draft.get("price_usd", 2.5)
         total_price = round(price_usd * quantity, 2)
         currency = method.get("currency", "$")
         instructions = method["details"]

@@ -87,12 +87,15 @@ def main():
         ],
         states={
             cust.SELECTING_PRODUCT: [
+                CallbackQueryHandler(cust.category_selected_callback, pattern="^cat:"),
+                CallbackQueryHandler(cust.back_to_categories_callback, pattern="^back_to_categories$"),
                 CallbackQueryHandler(cust.product_selected_callback, pattern="^prod:"),
                 CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
             ],
             cust.SELECTING_QUANTITY: [
                 CallbackQueryHandler(cust.quantity_selected_callback, pattern="^qty:"),
-                CallbackQueryHandler(cust.back_to_products_callback, pattern="^back_to_products$"),
+                CallbackQueryHandler(cust.back_to_products_callback, pattern="^back_to_prods:"),
+                CallbackQueryHandler(cust.back_to_categories_callback, pattern="^back_to_categories$"),
                 CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
             ],
             cust.SELECTING_PAYMENT: [

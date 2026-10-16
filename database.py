@@ -74,19 +74,53 @@ async def init_db():
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 price REAL NOT NULL,
+                price_usd REAL DEFAULT 2.5,
+                category TEXT DEFAULT 'other',
                 description TEXT DEFAULT '',
                 supplier_product_id INTEGER NULL,
                 is_active INTEGER DEFAULT 1
             );
         """)
 
-        # Seed initial products if not exists
-        await db.execute("""
-            INSERT OR IGNORE INTO products (id, name, price, description, supplier_product_id, is_active)
-            VALUES 
-            ('gemini_18m', 'جيميني برو 18 شهر', 1100.0, '💎 اشتراك Google Gemini Pro أصلي لمدة 18 شهر بضمان كامل.', 14, 1),
-            ('gemini_12m', 'جيميني برو 12 شهر', 1000.0, '💎 اشتراك Google Gemini Pro أصلي لمدة 12 شهر بضمان كامل.', 14, 1)
-        """)
+        # Migrations for existing DB
+        try:
+            await db.execute("ALTER TABLE products ADD COLUMN category TEXT DEFAULT 'other'")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE products ADD COLUMN price_usd REAL DEFAULT 2.5")
+        except Exception:
+            pass
+
+        # Seed products if not exists
+        initial_products = [
+            # 1. Gemini
+            ("gemini_18m", "جيميني برو 18 شهر", 1100.0, 2.5, "gemini", "💎 اشتراك Google Gemini Pro أصلي لمدة 18 شهر بضمان كامل مع ميزات AI المتقدمة و2TB تخزين سحابي.", 14, 1),
+            ("gemini_12m", "جيميني برو 12 شهر", 1000.0, 2.5, "gemini", "💎 اشتراك Google Gemini Pro أصلي لمدة 12 شهر بضمان كامل مع ميزات AI المتقدمة و2TB تخزين سحابي.", 14, 1),
+            
+            # 2. ChatGPT
+            ("chatgpt_plus_4m", "ChatGPT Plus (4 أشهر)", 6000.0, 25.0, "chatgpt", "🤖 اشتراك شات جي بي تي بلس الأصلي لمدة 4 أشهر كاملة مع ميزات GPT-4o وتوليد الصور المتقدمة.", 90, 1),
+            ("codex_api_10m", "Codex API (10M Tokens)", 1000.0, 2.5, "chatgpt", "💻 رصيد 10 مليون توكن API لـ OpenAI Codex للمطورين والمبرمجين مع ضمان كامل.", 36, 1),
+            
+            # 3. Other Products
+            ("duolingo_12m", "Duolingo Super (12 شهر)", 600.0, 1.5, "other", "🦉 اشتراك دوولينجو سوبر لمدة سنة كاملة بدون إعلانات مع قلوب غير محدودة لتعلم اللغات.", 74, 1),
+            ("adobe_express_12m", "Adobe Express (12 شهر)", 500.0, 1.5, "other", "🎨 اشتراك أدوبي إكسبريس بريميوم لمدة سنة كاملة للتصميم وصناعة المحتوى مع آلاف القوالب.", None, 1),
+            ("apple_music_5m", "Apple Music (5 أشهر)", 500.0, 1.5, "other", "🎵 اشتراك أبل ميوزك أصلي لمدة 5 أشهر مع جودة صوت فائقة وبدون إعلانات.", None, 1),
+            ("capcut_pro_30d", "CapCut Pro (30 يوم)", 800.0, 2.5, "other", "🎬 اشتراك كاب كت برو لمدة شهر لمونتاج وتعديل الفيديوهات باحترافية وبدون علامة مائية.", 21, 1),
+            ("claude_api_10m", "Claude API (10M Tokens)", 1000.0, 2.5, "other", "⚡️ رصيد 10 مليون توكن API لـ Claude 3.5 Sonnet / Opus للمطورين مع ضمان كامل.", 32, 1),
+        ]
+
+        for p in initial_products:
+            await db.execute("""
+                INSERT INTO products (id, name, price, price_usd, category, description, supplier_product_id, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name=excluded.name,
+                    price_usd=excluded.price_usd,
+                    category=excluded.category,
+                    description=excluded.description,
+                    supplier_product_id=excluded.supplier_product_id
+            """, p)
 
         # Set default payment info if not exists
         await db.execute(
@@ -105,6 +139,16 @@ async def get_all_products(only_active: bool = True) -> dict[str, dict]:
         cursor = await db.execute(query)
         rows = await cursor.fetchall()
         return {r["id"]: dict(r) for r in rows}
+
+
+async def get_products_by_category(category: str, only_active: bool = True) -> dict[str, dict]:
+    """Fetch products filtered by category ('gemini', 'chatgpt', 'other')"""
+    async with get_db() as db:
+        query = "SELECT * FROM products WHERE category = ? AND is_active = 1 ORDER BY price DESC" if only_active else "SELECT * FROM products WHERE category = ? ORDER BY price DESC"
+        cursor = await db.execute(query, (category,))
+        rows = await cursor.fetchall()
+        return {r["id"]: dict(r) for r in rows}
+
 
 
 async def get_product_by_id(product_id: str) -> dict | None:

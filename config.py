@@ -17,18 +17,26 @@ SUPPLIER_API_KEY = os.getenv("SUPPLIER_API_KEY", "psk_w8FN2yLrZ5XEovOCDLPf2diXbF
 SUPPLIER_SHOP_ID = os.getenv("SUPPLIER_SHOP_ID", "TG5075624178").strip()
 
 # Map local products to Supplier Product IDs
-# 14 = Gemini Pro — 18 Months (Links)
+# Map local products to Supplier Product IDs (LahaStore)
 SUPPLIER_PRODUCT_MAP = {
     "gemini_18m": 14,
     "gemini_12m": 14,
+    "chatgpt_plus_4m": 90,
+    "codex_api_10m": 36,
+    "claude_api_10m": 32,
+    "capcut_pro_30d": 21,
+    "duolingo_12m": 74,
 }
 
-# AccZone (Backup Supplier) API Configuration
+# AccZone API Configuration
 ACCZONE_BASE_URL = os.getenv("ACCZONE_BASE_URL", "https://api.acczone.xyz").rstrip("/")
 ACCZONE_API_KEY = os.getenv("ACCZONE_API_KEY", "Uw186NiI_zvEGO0SDFDxIPAW4CnhWTek3NY9UPr_34A").strip()
 ACCZONE_PRODUCT_MAP = {
     "gemini_18m": "geminilive",
     "gemini_12m": "geminilive",
+    "duolingo_12m": "DUOLINGO",
+    "adobe_express_12m": "ADOBE_EXPRESS",
+    "apple_music_5m": "APPLE_MUSIC_PREPAID_V2",
 }
 
 # Database File Path
