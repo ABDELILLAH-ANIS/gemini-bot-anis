@@ -29,15 +29,20 @@ def get_categories_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_products_keyboard(products: dict, category: str = "gemini"):
+def get_products_keyboard(products: dict, category: str = "gemini", stock_status: dict | None = None):
     """Inline keyboard for selecting a subscription plan dynamically from DB"""
     keyboard = []
     for pid, prod in products.items():
-        text = f"{prod['name']} — {prod['price']} {CURRENCY}"
+        is_preorder = False
+        if stock_status is not None and pid in stock_status:
+            is_preorder = not stock_status[pid]
+        badge = " (حجز مسبق ⏳)" if is_preorder else ""
+        text = f"{prod['name']}{badge} — {prod['price']} {CURRENCY}"
         keyboard.append([InlineKeyboardButton(text, callback_data=f"prod:{pid}")])
     keyboard.append([InlineKeyboardButton("🔙 رجوع للأقسام", callback_data="back_to_categories")])
     keyboard.append([InlineKeyboardButton("❌ إلغاء", callback_data="cancel_order")])
     return InlineKeyboardMarkup(keyboard)
+
 
 
 def get_quantity_keyboard(product_id: str, category: str = "gemini"):
@@ -121,10 +126,11 @@ def get_admin_menu_keyboard():
             InlineKeyboardButton("🌐 رصيد ومخزن المورد (API)", callback_data="adm_supplier"),
         ],
         [
-            InlineKeyboardButton("💳 تعديل بيانات الدفع", callback_data="adm_edit_payment"),
+            InlineKeyboardButton("🔄 مزامنة وفحص منتجات الموردين", callback_data="adm_sync_apis"),
             InlineKeyboardButton("📢 قناة الإثباتات", callback_data="adm_proof_channel"),
         ],
         [
+            InlineKeyboardButton("💳 تعديل بيانات الدفع", callback_data="adm_edit_payment"),
             InlineKeyboardButton("🔙 إغلاق اللوحة", callback_data="adm_close"),
         ],
     ]

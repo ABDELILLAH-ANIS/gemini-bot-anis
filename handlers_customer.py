@@ -11,6 +11,7 @@ from telegram.ext import (
 from config import PRODUCTS, CURRENCY, ADMIN_IDS, PAYMENT_METHODS
 import database
 import keyboards
+import supplier_api
 
 # Conversation states
 SELECTING_PRODUCT = 1
@@ -124,6 +125,7 @@ async def category_selected_callback(update: Update, context: ContextTypes.DEFAU
 
     cat = query.data.split(":")[1]
     products = await database.get_products_by_category(cat, only_active=True)
+    stock_status = await supplier_api.get_products_stock_summary(list(products.keys())) if products else None
 
     cat_titles = {
         "gemini": "💎 **اشتراكات Google Gemini AI:**",
@@ -139,7 +141,7 @@ async def category_selected_callback(update: Update, context: ContextTypes.DEFAU
 
     await query.message.edit_text(
         text,
-        reply_markup=keyboards.get_products_keyboard(products, category=cat),
+        reply_markup=keyboards.get_products_keyboard(products, category=cat, stock_status=stock_status),
         parse_mode="Markdown",
     )
     return SELECTING_PRODUCT
@@ -171,6 +173,10 @@ async def product_selected_callback(update: Update, context: ContextTypes.DEFAUL
     cat = product.get("category", "other")
     price_usd = product.get("price_usd", 2.5)
 
+    # Check live stock across local stock and connected suppliers
+    stock_info = await supplier_api.check_total_product_stock(product_id)
+    is_preorder = not stock_info.get("is_in_stock", True)
+
     # Save to draft
     context.user_data["order_draft"] = {
         "product_id": product_id,
@@ -178,13 +184,26 @@ async def product_selected_callback(update: Update, context: ContextTypes.DEFAUL
         "price": product["price"],
         "price_usd": price_usd,
         "category": cat,
+        "is_preorder": is_preorder,
     }
+
+    if is_preorder:
+        stock_notice = (
+            "⚠️ **حالة المخزون:** 🔴 **غير متوفر للتسليم الفوري حالياً (نفد المخزون)**.\n"
+            "📌 **نظام الحجز المسبق:** إذا أردت حجز هذا الاشتراك، أكمل الدفع وسنتواصل معك ونقوم بشرائه وتفعيله لك يدوياً في أقرب وقت! 🌟\n\n"
+            "🔢 **حدد الكمية المطلوبة للمتابعة في الحجز المسبق:**"
+        )
+    else:
+        stock_notice = (
+            "⚡️ **حالة المخزون:** ✅ **متوفر للتسليم الفوري**\n\n"
+            "🔢 **الرجاء تحديد الكمية المطلوبة:**"
+        )
 
     text = (
         f"💎 **لقد اخترت:** {product['name']}\n"
         f"💵 **السعر:** {product['price']} {CURRENCY}\n"
         f"📝 {product['description']}\n\n"
-        "🔢 **الرجاء تحديد الكمية المطلوبة:**"
+        f"{stock_notice}"
     )
     await query.message.edit_text(
         text,
@@ -201,9 +220,10 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
     parts = query.data.split(":")
     cat = parts[1] if len(parts) > 1 else "gemini"
     products = await database.get_products_by_category(cat, only_active=True)
+    stock_status = await supplier_api.get_products_stock_summary(list(products.keys())) if products else None
     await query.message.edit_text(
         "🛍️ **اختر باقة الاشتراك المناسبة لك:**",
-        reply_markup=keyboards.get_products_keyboard(products, category=cat),
+        reply_markup=keyboards.get_products_keyboard(products, category=cat, stock_status=stock_status),
         parse_mode="Markdown",
     )
     return SELECTING_PRODUCT
@@ -279,14 +299,22 @@ async def payment_method_selected_callback(update: Update, context: ContextTypes
     draft["currency"] = currency
     context.user_data["order_draft"] = draft
 
+    is_preorder = draft.get("is_preorder", False)
+    preorder_notice = (
+        "⚠️ **تنبيه:** هذا الطلب بنظام **الحجز المسبق** (المنتج غير متوفر للتسليم الفوري).\n"
+        "سيقوم المشرف بشرائه وتفعيله لك يدوياً والتواصل معك فور استلام الحوالة.\n"
+        "─────────────────\n"
+    ) if is_preorder else ""
+
     summary_text = (
-        f"📋 **ملخص طلبك:**\n"
+        f"📋 **ملخص طلبك{' (حجز مسبق ⏳)' if is_preorder else ''}:**\n"
         f"─────────────────\n"
         f"📦 **المنتج:** {draft['product_name']}\n"
         f"🔢 **الكمية:** {quantity}\n"
         f"💳 **طريقة الدفع:** {method['name']}\n"
         f"💰 **المبلغ الإجمالي المطلوب:** `{total_price}` {currency}\n"
-        f"─────────────────\n\n"
+        f"─────────────────\n"
+        f"{preorder_notice}"
         f"{instructions}\n\n"
         "👇 اضغط على الزر بالأسفل عندما تكون جاهزاً لإرسال إشعار التحويل ورقم الحوالة:"
     )
@@ -410,16 +438,30 @@ async def finalize_order_submission(update: Update, context: ContextTypes.DEFAUL
     )
 
     # Customer success message
-    customer_msg = (
-        f"🎉 **تم إرسال طلبك بنجاح!**\n\n"
-        f"🔹 **رقم الطلب:** `{order_code}`\n"
-        f"📦 **المنتج:** {draft['product_name']}\n"
-        f"🔢 **الكمية:** {draft['quantity']}\n"
-        f"💳 **طريقة الدفع:** {pay_method}\n"
-        f"💰 **المبلغ:** {draft['total_price']} {pay_curr}\n"
-        f"🧾 **رقم التحويل:** `{draft.get('transfer_number')}`\n\n"
-        "⏳ جاري التحقق من إشعار التحويل من قبل الإدارة. ستصلك روابط التفعيل هنا في المحادثة فور التأكيد!"
-    )
+    is_preorder = draft.get("is_preorder", False)
+    if is_preorder:
+        customer_msg = (
+            f"🎉 **تم استلام طلب الحجز المسبق بنجاح!**\n\n"
+            f"🔹 **رقم الطلب:** `{order_code}`\n"
+            f"📦 **المنتج:** {draft['product_name']}\n"
+            f"🔢 **الكمية:** {draft['quantity']}\n"
+            f"💳 **طريقة الدفع:** {pay_method}\n"
+            f"💰 **المبلغ:** {draft['total_price']} {pay_curr}\n"
+            f"🧾 **رقم التحويل:** `{draft.get('transfer_number')}`\n\n"
+            "⏳ **حالة الطلب:** حجز مسبق قيد المراجعة والتجهيز اليدوي.\n"
+            "سنقوم بالتحقق من الحوالة وتفعيل اشتراكك والتواصل معك هنا مباشرة لتسليمك الحساب في أقرب وقت. شكراً لصبرك وثقتك بنا! 🌟"
+        )
+    else:
+        customer_msg = (
+            f"🎉 **تم إرسال طلبك بنجاح!**\n\n"
+            f"🔹 **رقم الطلب:** `{order_code}`\n"
+            f"📦 **المنتج:** {draft['product_name']}\n"
+            f"🔢 **الكمية:** {draft['quantity']}\n"
+            f"💳 **طريقة الدفع:** {pay_method}\n"
+            f"💰 **المبلغ:** {draft['total_price']} {pay_curr}\n"
+            f"🧾 **رقم التحويل:** `{draft.get('transfer_number')}`\n\n"
+            "⏳ جاري التحقق من إشعار التحويل من قبل الإدارة. ستصلك روابط التفعيل هنا في المحادثة فور التأكيد!"
+        )
     await update.message.reply_text(
         customer_msg,
         reply_markup=keyboards.get_main_menu(user.id),
@@ -448,9 +490,17 @@ async def notify_admins_new_order(
     available_stock = stock_counts.get(draft["product_id"], 0)
     pay_method = draft.get("payment_method_name", "بريدي موب")
     pay_curr = draft.get("currency", "دينار")
+    is_preorder = draft.get("is_preorder", False)
+
+    if is_preorder:
+        stock_status_label = "🔴 **حجز مسبق** (المخزون الفوري نفد - يتطلب شراء يدوي من طرفك)"
+        order_title = f"🔔 **طلب حجز مسبق جديد ⏳: `{order_code}`**"
+    else:
+        stock_status_label = f"{available_stock} رابط ({'✅ متوفر محلياً' if available_stock >= draft['quantity'] else '🌐 سيتم السحب تلقائياً من API المورد'})"
+        order_title = f"🔔 **طلب شراء جديد: `{order_code}`**"
 
     admin_caption = (
-        f"🔔 **طلب شراء جديد: `{order_code}`**\n"
+        f"{order_title}\n"
         f"─────────────────\n"
         f"👤 **العميل:** {html.escape(user.full_name)} "
         f"({f'@{user.username}' if user.username else 'لا يوجد معرف'})\n"
@@ -461,8 +511,7 @@ async def notify_admins_new_order(
         f"💰 **المبلغ المطلوب:** `{draft['total_price']}` {pay_curr}\n"
         f"🧾 **رقم التحويل:** `{draft.get('transfer_number')}`\n"
         f"─────────────────\n"
-        f"📦 **المخزن المحلي:** {available_stock} رابط "
-        f"({'✅ متوفر محلياً' if available_stock >= draft['quantity'] else '🌐 سيتم السحب تلقائياً من API المورد أو الطلب يدوياً'})\n"
+        f"📦 **حالة المخزون:** {stock_status_label}\n"
     )
 
     for admin_id in ADMIN_IDS:

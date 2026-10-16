@@ -491,6 +491,58 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
+    # Sync & Scan Supplier Products (APIs)
+    if data == "adm_sync_apis":
+        await query.answer("🔄 جاري فحص ومزامنة منتجات الموردين...")
+        loading_text = (
+            "🔄 **جاري فحص الموردين ومزامنة المنتجات...**\n\n"
+            "• فحص كتالوج DigitalCore API...\n"
+            "• فحص كتالوج LahaStore API...\n"
+            "• فحص خدمات AccZone API...\n"
+            "يرجى الانتظار بضع ثوانٍ ⏳"
+        )
+        try:
+            await query.message.edit_text(loading_text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+        new_items = await supplier_api.sync_new_supplier_products(bot=context.bot)
+
+        # Live counts
+        dc_stock = await supplier_api.get_digitalcore_stock()
+        dc_count = len(dc_stock.get("products", [])) if dc_stock.get("ok") else 0
+        laha_stock = await supplier_api.get_lahastore_all_products()
+        laha_count = len(laha_stock.get("products", [])) if laha_stock.get("ok") else 0
+        acc_stock = await supplier_api.get_acczone_all_services()
+        acc_count = len(acc_stock.get("services", [])) if acc_stock.get("ok") else 0
+
+        res_text = (
+            "🎉 **اكتمل فحص ومزامنة منتجات الموردين بنجاح!**\n"
+            "─────────────────────\n"
+            f"🥇 **DigitalCore:** `{dc_count}` منتج نشط\n"
+            f"🥈 **LahaStore:** `{laha_count}` منتج نشط\n"
+            f"🥉 **AccZone:** `{acc_count}` خدمات نشطة\n"
+            "─────────────────────\n"
+        )
+        if new_items:
+            res_text += f"🆕 **تم اكتشاف وإضافة `{len(new_items)}` منتج جديد للمتجر تلقائياً:**\n\n"
+            for itm in new_items:
+                res_text += (
+                    f"• **{itm['name']}** ({itm['supplier']})\n"
+                    f"  سعر الجملة: `${itm['wholesale']}` | سعر البيع: `{itm['price_dzd']} دج` (${itm['price_usd']})\n"
+                    f"  المخزون: `{itm['stock']}` قطعة | القسم: `{itm['category']}`\n\n"
+                )
+            res_text += "💡 يمكنك تعديل الأسعار أو إيقاف أي منتج من 'إدارة المنتجات والأسعار'."
+        else:
+            res_text += "✅ **جميع المنتجات لدى الموردين مسجلة ومحدثة في قاعدة البيانات مسبقاً!**\nلا توجد منتجات جديدة غير مضافة حالياً."
+
+        await query.message.edit_text(
+            res_text,
+            reply_markup=keyboards.get_admin_menu_keyboard(),
+            parse_mode="Markdown",
+        )
+        return
+
     # Approve Order Clicked
     if data.startswith("adm_appr:"):
         order_id = int(data.split(":")[1])

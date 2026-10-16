@@ -280,14 +280,16 @@ async def add_new_product(
     price: float,
     description: str = "",
     supplier_product_id: int | None = None,
+    price_usd: float = 2.5,
+    category: str = "other",
 ):
     # Supabase Cloud insert
     payload = {
         "id": product_id,
         "name": name,
         "price": price,
-        "price_usd": 2.5,
-        "category": "other",
+        "price_usd": price_usd,
+        "category": category,
         "description": description,
         "supplier_product_id": supplier_product_id,
         "is_active": 1,
@@ -298,10 +300,10 @@ async def add_new_product(
     async with get_db() as db:
         await db.execute(
             """
-            INSERT OR REPLACE INTO products (id, name, price, description, supplier_product_id, is_active)
-            VALUES (?, ?, ?, ?, ?, 1)
+            INSERT OR REPLACE INTO products (id, name, price, price_usd, category, description, supplier_product_id, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             """,
-            (product_id, name, price, description, supplier_product_id),
+            (product_id, name, price, price_usd, category, description, supplier_product_id),
         )
         await db.commit()
 
@@ -753,3 +755,39 @@ async def update_proof_channel(new_channel: str):
             (clean_chan,),
         )
         await db.commit()
+
+
+# ==================== إعدادات عامة (Generic Key-Value Settings) ====================
+
+async def get_setting(key: str, default: str = "") -> str:
+    """Fetch setting value from Supabase with local SQLite fallback"""
+    sb_row = await _sb_request("GET", "bot_settings", params={"key": f"eq.{key}", "select": "value", "limit": 1})
+    if sb_row is not None and isinstance(sb_row, list) and sb_row:
+        val = sb_row[0].get("value")
+        if val is not None:
+            return str(val)
+
+    async with get_db() as db:
+        cur = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = await cur.fetchone()
+        if row and row["value"] is not None:
+            return str(row["value"])
+    return default
+
+
+async def set_setting(key: str, value: str):
+    """Save setting value to Supabase Cloud and local SQLite"""
+    val_str = str(value)
+    await _sb_request(
+        "POST",
+        "bot_settings",
+        json_data={"key": key, "value": val_str},
+        prefer="resolution=merge-duplicates"
+    )
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, val_str),
+        )
+        await db.commit()
+

@@ -19,10 +19,12 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ConversationHandler,
+    ContextTypes,
     filters,
 )
 from config import BOT_TOKEN, ADMIN_IDS
 import database
+import supplier_api
 import handlers_customer as cust
 import handlers_admin as adm
 
@@ -35,10 +37,25 @@ logger = logging.getLogger(__name__)
 
 
 async def post_init(application):
-    """Run database initialization on bot startup"""
+    """Run database initialization and supplier mapping cache on startup"""
     logger.info("Initializing database...")
     await database.init_db()
     logger.info("Database initialized successfully.")
+
+    logger.info("Loading dynamic supplier mappings from database...")
+    await supplier_api.load_dynamic_mappings_from_db()
+    logger.info("Dynamic supplier mappings loaded successfully.")
+
+
+async def periodic_supplier_sync_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodically check supplier APIs for newly added products (runs every 30 minutes)"""
+    try:
+        logger.info("Running scheduled supplier API product synchronization...")
+        new_items = await supplier_api.sync_new_supplier_products(bot=context.bot)
+        if new_items:
+            logger.info(f"Scheduled sync discovered and imported {len(new_items)} new supplier products!")
+    except Exception as e:
+        logger.error(f"Error during scheduled supplier sync job: {e}", exc_info=True)
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -78,6 +95,13 @@ def main():
 
     # Build Application
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # Schedule periodic supplier API scan (every 30 minutes, first run 30s after start)
+    if app.job_queue:
+        app.job_queue.run_repeating(periodic_supplier_sync_job, interval=1800, first=30)
+        logger.info("Scheduled periodic supplier product sync every 30 minutes.")
+    else:
+        logger.warning("JobQueue is not enabled; automatic supplier sync will not run in background.")
 
     # 1. Customer Order Conversation
     order_conv_handler = ConversationHandler(
