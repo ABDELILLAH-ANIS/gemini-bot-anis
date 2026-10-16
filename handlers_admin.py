@@ -309,10 +309,18 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
                 [InlineKeyboardButton("🤖 تجربة زر البوت", url=f"https://t.me/{bot_me.username}")]
             ]) if bot_me.username else None
 
+            test_text = (
+                "🎉 **New Purchase!**\n\n"
+                "▪️ **Service:** Gemini AI\n"
+                "👤 **By:** `(117***89)`\n"
+                "🛍 **Plan:** Gemini Pro — 18 Months (Links)\n"
+                "🔖 **Order No.:** `ORDER097C3CA1BC`\n"
+                "   **QTY:** 1"
+            )
             chat_id_target = int(curr_chan) if (curr_chan.startswith("-") and curr_chan[1:].isdigit()) else curr_chan
             await context.bot.send_message(
                 chat_id=chat_id_target,
-                text="🧪 **منشور تجريبي لقناة الإثباتات:**\nتم ربط البوت بالقناة بنجاح! سيتم نشر عمليات البيع الناجحة هنا تلقائياً لتوثيق الطلبات ✅",
+                text=test_text,
                 reply_markup=test_markup,
                 parse_mode="Markdown",
             )
@@ -538,49 +546,26 @@ async def process_order_approval(
     await query.answer("⚠️ يرجى إدخال الرابط يدوياً (المخازن والموردين غير متاحين حالياً).", show_alert=True)
 
 
-def mask_customer_info(name: str, username: str, user_id: int) -> str:
-    """Masks sensitive customer personal info for public proofs channel"""
-    parts = []
-    if name:
-        clean_name = name.strip()
-        if len(clean_name) <= 2:
-            parts.append(clean_name[0] + "*")
-        else:
-            parts.append(f"{clean_name[0]}{'*' * min(3, len(clean_name)-2)}{clean_name[-1]}")
-
-    if username:
-        u = username.lstrip("@").strip()
-        if len(u) <= 2:
-            parts.append(f"(@{u[0]}*)")
-        else:
-            parts.append(f"(@{u[0]}{'*' * min(3, len(u)-2)}{u[-1]})")
-    elif user_id:
-        uid_str = str(user_id)
-        if len(uid_str) > 4:
-            parts.append(f"({uid_str[:4]}****)")
-
-    return " ".join(parts) if parts else "عميل مميز ⭐"
+def format_masked_user_id(user_id: int) -> str:
+    """Format user ID as (117***89)"""
+    uid_str = str(user_id) if user_id else "117000089"
+    if len(uid_str) >= 5:
+        return f"({uid_str[:3]}***{uid_str[-2:]})"
+    elif len(uid_str) > 2:
+        return f"({uid_str[0]}***{uid_str[-1]})"
+    return "(***)"
 
 
 async def post_order_proof_to_channel(context: ContextTypes.DEFAULT_TYPE, order: dict):
-    """Broadcasts a clean, privacy-masked proof of completed order to public proof channel"""
+    """Broadcasts a clean, privacy-masked proof of completed order to public proof channel/group"""
     channel = await database.get_proof_channel()
     if not channel:
         return
 
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    masked_cust = mask_customer_info(
-        order.get("user_name", ""),
-        order.get("user_username", ""),
-        order.get("user_id", 0),
-    )
-
-    currency = order.get("currency", CURRENCY)
-    price_val = order.get("total_price", 0)
-    payment_method = order.get("payment_method", "بريدي موب")
-    product_name = order.get("product_name", "اشتراك Google AI Pro")
+    masked_by = format_masked_user_id(order.get("user_id", 0))
+    plan_name = order.get("product_name", "Gemini Pro — 18 Months (Links)")
     quantity = order.get("quantity", 1)
-    order_code = order.get("order_code", "ORD")
+    order_code = order.get("order_code", "ORDER")
 
     bot_username = ""
     try:
@@ -590,25 +575,18 @@ async def post_order_proof_to_channel(context: ContextTypes.DEFAULT_TYPE, order:
         pass
 
     proof_text = (
-        "🛍️ **عملية تسليم وتفعيل ناجحة! ✅**\n"
-        "─────────────────────\n"
-        f"📦 **المنتج:** {product_name}\n"
-        f"🔢 **الكمية:** {quantity}\n"
-        f"💳 **طريقة الدفع:** {payment_method}\n"
-        f"💰 **المبلغ:** `{price_val}` {currency}\n"
-        f"👤 **العميل:** {masked_cust}\n"
-        f"🆔 **رقم الطلب:** `#{order_code}`\n"
-        f"🕒 **التاريخ:** {now_str}\n"
-        "─────────────────────\n"
-        "⚡️ **الحالة:** تم تسليم رابط التفعيل الرسمي للعميل بنجاح 🚀\n"
-        "💎 نسعد دائماً بثقتكم واختياركم لنا!\n\n"
-        "👇 **لطلب اشتراكك الخاص فوراً عبر البوت:**"
+        "🎉 **New Purchase!**\n\n"
+        "▪️ **Service:** Gemini AI\n"
+        f"👤 **By:** `{masked_by}`\n"
+        f"🛍 **Plan:** {plan_name}\n"
+        f"🔖 **Order No.:** `{order_code}`\n"
+        f"   **QTY:** {quantity}"
     )
 
     reply_markup = None
     if bot_username:
         reply_markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🤖 اطلب اشتراكك الآن من البوت", url=f"https://t.me/{bot_username}")]
+            [InlineKeyboardButton("🛒 Buy / طلب اشتراك", url=f"https://t.me/{bot_username}")]
         ])
 
     try:
