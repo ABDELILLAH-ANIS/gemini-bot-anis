@@ -216,6 +216,37 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         await query.message.edit_text(text, parse_mode="Markdown")
         return
 
+    # Cancel pending links
+    if data == "adm_cancel_pending_links":
+        context.bot_data.pop(f"admin_pending_links_{user_id}", None)
+        await query.message.edit_text("❌ تم إلغاء العملية ولم يتم حفظ الروابط.")
+        return
+
+    # Assign pending links to selected product
+    if data.startswith("adm_assign_stock:"):
+        pid = data.split(":")[1]
+        pending_links = context.bot_data.pop(f"admin_pending_links_{user_id}", [])
+        if not pending_links:
+            await query.message.edit_text("⚠️ لم يتم العثور على روابط معلقة أو انتهت صلاحيتها.")
+            return
+
+        added_count = await database.add_links_to_stock(pid, pending_links)
+        prod = await database.get_product_by_id(pid)
+        prod_name = prod["name"] if prod else pid
+
+        counts = await database.get_stock_counts()
+        curr_stock = counts.get(pid, 0)
+
+        await query.message.edit_text(
+            f"🎉 **تمت إضافة الروابط بنجاح!**\n\n"
+            f"📦 المنتج: **{prod_name}**\n"
+            f"➕ عدد الروابط المضافة: `{added_count}` رابط\n"
+            f"📊 إجمالي المخزون الحالي للمنتج: `{curr_stock}` رابط متوفر\n"
+            f"☁️ تم الحفظ والمزامنة السحابية بشكل دائم 🔒",
+            parse_mode="Markdown",
+        )
+        return
+
     # Pending Orders
     if data == "adm_pending":
         pending = await database.get_pending_orders(limit=10)
@@ -814,9 +845,14 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         prod_name = prod["name"] if prod else stock_product_id
 
         context.bot_data.pop(f"admin_add_stock_{user_id}", None)
+        counts = await database.get_stock_counts()
+        curr_stock = counts.get(stock_product_id, 0)
         await update.message.reply_text(
-            f"🎉 **تمت الإضافة بنجاح!**\n"
-            f"تمت إضافة `{added_count}` رابط جديد إلى مخزن: **{prod_name}**.",
+            f"🎉 **تمت الإضافة بنجاح!**\n\n"
+            f"📦 المنتج: **{prod_name}**\n"
+            f"➕ عدد الروابط المضافة: `{added_count}` رابط\n"
+            f"📊 إجمالي المخزون الحالي للمنتج: `{curr_stock}` رابط متوفر\n"
+            f"☁️ تم الحفظ والمزامنة السحابية بشكل دائم 🔒",
             parse_mode="Markdown",
         )
         return
@@ -864,6 +900,30 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             f"✅ **تم ضبط قناة إثباتات المبيعات بنجاح!**\n"
             f"القناة: `{clean_chan}`{title_info}\n\n"
             "اضغط الآن على **'🧪 إرسال منشور تجريبي للقناة'** من لوحة التحكم للتأكد من وصول الرسائل! 🚀",
+            parse_mode="Markdown",
+        )
+        return
+
+    # 8. Fallback Smart Link Detector: If the admin pastes links directly into chat
+    potential_lines = [line.strip() for line in text.split("\n") if line.strip()]
+    link_candidates = [
+        l for l in potential_lines 
+        if any(marker in l.lower() for marker in ("http://", "https://", "serviceactive", "t.me/", ".com", ".online", ".xyz", ".me", "lh3.google"))
+    ]
+
+    if link_candidates:
+        context.bot_data[f"admin_pending_links_{user_id}"] = link_candidates
+        prods = await database.get_all_products(only_active=True)
+        buttons = []
+        for pid, prod in prods.items():
+            buttons.append([InlineKeyboardButton(f"📦 {prod['name']}", callback_data=f"adm_assign_stock:{pid}")])
+        buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="adm_cancel_pending_links")])
+
+        keyboard = InlineKeyboardMarkup(buttons)
+        await update.message.reply_text(
+            f"📥 **تم اكتشاف `{len(link_candidates)}` رابط في رسالتك!**\n\n"
+            "👇 **يرجى اختيار المنتج المراد حفظ هذه الروابط في مخزونه السحابي:**",
+            reply_markup=keyboard,
             parse_mode="Markdown",
         )
         return

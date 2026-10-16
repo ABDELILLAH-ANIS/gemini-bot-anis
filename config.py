@@ -39,8 +39,15 @@ ACCZONE_PRODUCT_MAP = {
     "apple_music_5m": "APPLE_MUSIC_PREPAID_V2",
 }
 
-# Database File Path
+# Database File Path (Local fallback cache)
 DB_PATH = os.path.join(os.path.dirname(__file__), "gemini_store.db")
+
+# Supabase Cloud Database Configuration (Persistent storage across redeploys)
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://nqjibgbmcpkimqzczmkk.supabase.co").rstrip("/")
+SUPABASE_KEY = os.getenv(
+    "SUPABASE_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xamliZ2JtY3BraW1xemN6bWtrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMjMzNjIsImV4cCI6MjA5OTY5OTM2Mn0.jB4_ohSnRoQMkVD7gtjFBNaZn3hWXJMCK60bLAaVoYs",
+).strip()
 
 # Currency Name
 CURRENCY = "دينار"
