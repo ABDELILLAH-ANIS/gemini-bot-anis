@@ -661,9 +661,11 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
             if not desc or len(desc) > 300:
                 desc = f"اشتراك {clean_name} أصلي بضمان كامل مع وصول فوري لكافة الميزات."
 
-            local_pid = slug.strip().lower()
+            import re
+            clean_slug = re.sub(r"[^a-z0-9]+", "_", slug.strip().lower()).strip("_")
+            local_pid = clean_slug[:30]
             if local_pid in existing_ids:
-                local_pid = f"dc_{local_pid}"
+                local_pid = f"dc_{local_pid[:27]}"
 
             await database.add_new_product(
                 product_id=local_pid,
@@ -789,8 +791,15 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
                             reply_markup=kb,
                             parse_mode="Markdown",
                         )
-                    except Exception as e:
-                        logger.error(f"Failed to send new product alert to admin {admin_id}: {e}")
+                    except Exception:
+                        try:
+                            await bot.send_message(
+                                chat_id=admin_id,
+                                text=alert_text.replace("**", "").replace("`", ""),
+                                reply_markup=kb,
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to send new product alert to admin {admin_id}: {e}")
 
     return new_products_added
 

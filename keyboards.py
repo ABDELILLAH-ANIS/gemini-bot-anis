@@ -114,6 +114,10 @@ def get_admin_menu_keyboard():
     """Inline keyboard for Admin Dashboard"""
     keyboard = [
         [
+            InlineKeyboardButton("⏳ الطلبات المعلقة", callback_data="adm_pending"),
+            InlineKeyboardButton("📋 سجل جميع الطلبات", callback_data="adm_all_orders"),
+        ],
+        [
             InlineKeyboardButton("🏷️ إدارة المنتجات والأسعار", callback_data="adm_products_manage"),
             InlineKeyboardButton("📊 الإحصائيات", callback_data="adm_stats"),
         ],
@@ -122,15 +126,14 @@ def get_admin_menu_keyboard():
             InlineKeyboardButton("➕ إضافة روابط للمخزن", callback_data="adm_add_links"),
         ],
         [
-            InlineKeyboardButton("⏳ الطلبات المعلقة", callback_data="adm_pending"),
             InlineKeyboardButton("🌐 رصيد ومخزن المورد (API)", callback_data="adm_supplier"),
+            InlineKeyboardButton("🔄 مزامنة وفحص الموردين", callback_data="adm_sync_apis"),
         ],
         [
-            InlineKeyboardButton("🔄 مزامنة وفحص منتجات الموردين", callback_data="adm_sync_apis"),
             InlineKeyboardButton("📢 قناة الإثباتات", callback_data="adm_proof_channel"),
+            InlineKeyboardButton("💳 تعديل بيانات الدفع", callback_data="adm_edit_payment"),
         ],
         [
-            InlineKeyboardButton("💳 تعديل بيانات الدفع", callback_data="adm_edit_payment"),
             InlineKeyboardButton("🔙 إغلاق اللوحة", callback_data="adm_close"),
         ],
     ]

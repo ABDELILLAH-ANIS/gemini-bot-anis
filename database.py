@@ -490,42 +490,75 @@ async def create_order(
         await _sb_request("PATCH", "bot_orders", params={"id": f"eq.{order_id}"}, json_data={"order_code": order_code})
 
     # 2. Local SQLite order creation (for fallback / replication)
-    async with get_db() as db:
-        cursor = await db.execute(
-            """
-            INSERT INTO orders (
-                user_id, user_name, user_username, product_id, product_name,
-                quantity, total_price, transfer_number, receipt_file_id,
-                payment_method, currency,
-                status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
-            """,
-            (
-                user_id,
-                user_name,
-                user_username,
-                product_id,
-                product_name,
-                quantity,
-                total_price,
-                transfer_number,
-                receipt_file_id,
-                payment_method,
-                currency,
-                now_iso,
-                now_iso,
-            ),
-        )
-        local_order_id = cursor.lastrowid
+    try:
+        async with get_db() as db:
+            if order_id:
+                order_code = f"ORD-{order_id:04d}"
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO orders (
+                        id, order_code, user_id, user_name, user_username, product_id, product_name,
+                        quantity, total_price, transfer_number, receipt_file_id,
+                        payment_method, currency,
+                        status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                    """,
+                    (
+                        order_id,
+                        order_code,
+                        user_id,
+                        user_name,
+                        user_username,
+                        product_id,
+                        product_name,
+                        quantity,
+                        total_price,
+                        transfer_number,
+                        receipt_file_id,
+                        payment_method,
+                        currency,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO orders (
+                        user_id, user_name, user_username, product_id, product_name,
+                        quantity, total_price, transfer_number, receipt_file_id,
+                        payment_method, currency,
+                        status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                    """,
+                    (
+                        user_id,
+                        user_name,
+                        user_username,
+                        product_id,
+                        product_name,
+                        quantity,
+                        total_price,
+                        transfer_number,
+                        receipt_file_id,
+                        payment_method,
+                        currency,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+                order_id = cursor.lastrowid
+                order_code = f"ORD-{order_id:04d}"
+                await db.execute(
+                    "UPDATE orders SET order_code = ? WHERE id = ?",
+                    (order_code, order_id),
+                )
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Local SQLite order replication error: {e}")
         if not order_id:
-            order_id = local_order_id
-
+            order_id = int(datetime.datetime.now().timestamp()) % 100000
         order_code = f"ORD-{order_id:04d}"
-        await db.execute(
-            "UPDATE orders SET order_code = ? WHERE id = ?",
-            (order_code, local_order_id),
-        )
-        await db.commit()
 
     return order_id, order_code
 
@@ -542,7 +575,7 @@ async def get_order_by_id(order_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-async def get_pending_orders(limit: int = 10) -> list[dict]:
+async def get_pending_orders(limit: int = 20) -> list[dict]:
     sb_rows = await _sb_request(
         "GET",
         "bot_orders",
@@ -555,6 +588,25 @@ async def get_pending_orders(limit: int = 10) -> list[dict]:
     async with get_db() as db:
         cursor = await db.execute(
             "SELECT * FROM orders WHERE status = 'PENDING' ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_recent_orders(limit: int = 15) -> list[dict]:
+    sb_rows = await _sb_request(
+        "GET",
+        "bot_orders",
+        params={"order": "id.desc", "limit": str(limit)}
+    )
+    if sb_rows is not None and isinstance(sb_rows, list):
+        return sb_rows
+
+    # Local fallback
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM orders ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()

@@ -1,11 +1,14 @@
 import html
+import asyncio
 import datetime
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     ContextTypes,
     CommandHandler,
     CallbackQueryHandler,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -21,6 +24,83 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+def escape_md(val) -> str:
+    """Safely escape legacy Telegram Markdown v1 special characters in dynamic strings"""
+    if val is None:
+        return ""
+    s = str(val)
+    for ch in ("_", "*", "`", "["):
+        s = s.replace(ch, f"\\{ch}")
+    return s
+
+
+def format_dt(val) -> str:
+    """Cleanly format ISO timestamp for display"""
+    if not val:
+        return "غير محدد"
+    return str(val)[:19].replace("T", " ")
+
+
+async def safe_answer(query, text: str | None = None, show_alert: bool = False):
+    """Answer a CallbackQuery at most once without raising BadRequest if already answered/expired"""
+    if getattr(query, "_answered_safely", False):
+        return
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+        setattr(query, "_answered_safely", True)
+    except Exception as e:
+        logger.debug(f"CallbackQuery answer ignored: {e}")
+
+
+async def safe_edit_text(message, text: str, reply_markup=None, parse_mode: str | None = "Markdown"):
+    """Safely edit message text with automatic fallback if Markdown fails, message unchanged, or photo message"""
+    if len(text) > 4050:
+        text = text[:4040] + "\n..."
+    try:
+        if getattr(message, "photo", None):
+            return await message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        return await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except BadRequest as e:
+        err_str = str(e)
+        if "Message is not modified" in err_str:
+            return None
+        if "Can't parse entities" in err_str:
+            clean_text = text.replace("**", "").replace("`", "").replace("\\_", "_").replace("\\*", "*")
+            try:
+                if getattr(message, "photo", None):
+                    return await message.reply_text(clean_text, reply_markup=reply_markup, parse_mode=None)
+                return await message.edit_text(clean_text, reply_markup=reply_markup, parse_mode=None)
+            except Exception as inner_e:
+                logger.error(f"Fallback edit_text failed: {inner_e}")
+                return None
+        try:
+            return await message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception:
+            clean_text = text.replace("**", "").replace("`", "")
+            return await message.reply_text(clean_text, reply_markup=reply_markup, parse_mode=None)
+    except Exception as e:
+        logger.error(f"Unexpected error in safe_edit_text: {e}")
+        return None
+
+
+async def safe_reply_text(message, text: str, reply_markup=None, parse_mode: str | None = "Markdown"):
+    """Safely reply_text with fallback to plain text if Markdown parsing fails"""
+    try:
+        return await message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        clean_text = text.replace("**", "").replace("`", "").replace("\\_", "_").replace("\\*", "*")
+        return await message.reply_text(clean_text, reply_markup=reply_markup, parse_mode=None)
+
+
+async def safe_send_message(bot, chat_id, text: str, reply_markup=None, parse_mode: str | None = "Markdown"):
+    """Safely send_message with fallback to plain text if Markdown parsing fails"""
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        clean_text = text.replace("**", "").replace("`", "").replace("\\_", "_").replace("\\*", "*")
+        return await bot.send_message(chat_id=chat_id, text=clean_text, reply_markup=reply_markup, parse_mode=None)
+
+
 async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point for /admin or reply button"""
     user_id = update.effective_user.id
@@ -34,11 +114,13 @@ async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "مرحباً بك في لوحة إدارة بوت اشتراكات جيميني.\n"
         "اختر العملية التي تريد إدارتها من الأزرار بالأسفل:"
     )
-    await update.message.reply_text(
+    await safe_reply_text(
+        update.message,
         text,
         reply_markup=keyboards.get_admin_menu_keyboard(),
         parse_mode="Markdown",
     )
+    return ConversationHandler.END
 
 
 async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -47,25 +129,30 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
     user_id = query.from_user.id
 
     if not is_admin(user_id):
-        await query.answer("⛔️ غير مصرح لك.", show_alert=True)
+        await safe_answer(query, "⛔️ غير مصرح لك.", show_alert=True)
         return
 
     data = query.data
-    await query.answer()
 
     # Close dashboard
     if data == "adm_close":
-        await query.message.delete()
+        await safe_answer(query)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         return
 
     # Back to admin menu
     if data in ["adm_back_menu", "adm_dashboard"]:
+        await safe_answer(query)
         text = (
             "⚙️ **لوحة تحكم المسؤول (Admin Dashboard)**\n"
             "─────────────────────\n"
             "اختر العملية التي تريد إدارتها:"
         )
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_menu_keyboard(),
             parse_mode="Markdown",
@@ -74,6 +161,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # View Statistics
     if data == "adm_stats":
+        await safe_answer(query, "📊 جاري تحديث الإحصائيات...")
         stats = await database.get_admin_stats()
         text = (
             "📊 **إحصائيات المتجر والمبيعات:**\n"
@@ -85,7 +173,8 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             f"👥 **إجمالي العملاء:** `{stats['unique_customers']}`\n"
             f"💰 **إجمالي الأرباح والمبيعات:** `{stats['total_revenue']}` {CURRENCY}\n"
         )
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_menu_keyboard(),
             parse_mode="Markdown",
@@ -94,11 +183,13 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Products Management Sub-menu
     if data == "adm_products_manage":
+        await safe_answer(query)
         text = (
             "🏷️ **إدارة المنتجات والأسعار:**\n─────────────────────\n"
             "من هنا يمكنك تعديل أسعار المنتجات الحالية، إضافة منتجات جديدة، أو إيقاف/تفعيل أي منتج."
         )
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_products_management_keyboard(),
             parse_mode="Markdown",
@@ -107,58 +198,69 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Select product to edit price
     if data == "adm_edit_price_select":
+        await safe_answer(query)
         prods = await database.get_all_products(only_active=False)
         text = "✏️ **اختر المنتج الذي تريد تعديل سعره:**"
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_select_product_for_price_edit(prods),
             parse_mode="Markdown",
         )
         return
 
-    # Awaiting new price for a specific product
-    if data.startswith("adm_set_price_for:"):
-        pid = data.split(":")[1]
+    # Awaiting new price for a specific product (supports both adm_set_price_for: and adm_edit_price:)
+    if data.startswith("adm_set_price_for:") or data.startswith("adm_edit_price:"):
+        await safe_answer(query)
+        pid = data.split(":", 1)[1]
         prod = await database.get_product_by_id(pid)
         if not prod:
-            await query.message.edit_text("⚠️ المنتج غير موجود.")
+            await safe_edit_text(query.message, "⚠️ المنتج غير موجود.")
             return
 
         context.bot_data[f"admin_set_price_{user_id}"] = pid
         text = (
-            f"✏️ **تعديل سعر:** {prod['name']}\n"
+            f"✏️ **تعديل سعر:** {escape_md(prod['name'])}\n"
             f"💵 **السعر الحالي:** {prod['price']} {CURRENCY}\n\n"
             "✍️ **أرسل الآن السعر الجديد بالدينار (أرقام فقط):**\n"
             "مثال: `1200`\n\n"
             "لإلغاء العملية أرسل: `/cancel_action`"
         )
-        await query.message.edit_text(text, parse_mode="Markdown")
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
         return
 
     # Toggle product visibility (active / inactive)
     if data == "adm_toggle_product_select":
+        await safe_answer(query)
         prods = await database.get_all_products(only_active=False)
         text = "👁️ **اضغط على أي منتج لإيقافه أو تفعيله:**"
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_select_product_for_toggle(prods),
             parse_mode="Markdown",
         )
         return
 
-    # Perform Toggle for product
-    if data.startswith("adm_toggle_for:"):
-        pid = data.split(":")[1]
-        await database.toggle_product_active(pid)
-        prods = await database.get_all_products(only_active=False)
-        await query.message.edit_reply_markup(
-            reply_markup=keyboards.get_admin_select_product_for_toggle(prods)
-        )
-        await query.answer("تم تغيير حالة المنتج بنجاح!", show_alert=False)
+    # Perform Toggle for product (supports both adm_toggle_for: and adm_toggle_prod:)
+    if data.startswith("adm_toggle_for:") or data.startswith("adm_toggle_prod:"):
+        pid = data.split(":", 1)[1]
+        is_now_active = await database.toggle_product_active(pid)
+        status_label = "🟢 مفعّل" if is_now_active else "🔴 متوقف"
+        await safe_answer(query, f"تم تغيير حالة المنتج إلى: {status_label}", show_alert=False)
+        if data.startswith("adm_toggle_for:"):
+            prods = await database.get_all_products(only_active=False)
+            try:
+                await query.message.edit_reply_markup(
+                    reply_markup=keyboards.get_admin_select_product_for_toggle(prods)
+                )
+            except Exception:
+                pass
         return
 
     # Add new product wizard start
     if data == "adm_add_product":
+        await safe_answer(query)
         context.bot_data[f"admin_add_prod_step_{user_id}"] = {"step": 1}
         text = (
             "➕ **إضافة منتج جديد (الخطوة 1 من 3):**\n\n"
@@ -166,20 +268,22 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "مثال: `ChatGPT Plus 1 Month` أو `اشتراك كانفا برو سنة`\n\n"
             "لإلغاء العملية أرسل: `/cancel_action`"
         )
-        await query.message.edit_text(text, parse_mode="Markdown")
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
         return
 
     # View Stock
     if data == "adm_stock":
+        await safe_answer(query, "📦 جاري جرد المخزن...")
         counts = await database.get_stock_counts()
         prods = await database.get_all_products(only_active=False)
-        text = "📦 **جرد المخزون الحالي للروابط:**\n─────────────────────\n"
+        text = "📦 **جرد المخزون المحلي للروابط:**\n─────────────────────\n"
         for pid, prod in prods.items():
             cnt = counts.get(pid, 0)
             status_dot = "🟢" if cnt > 5 else ("🟡" if cnt > 0 else "🔴")
-            text += f"{status_dot} **{prod['name']}:** `{cnt}` رابط متوفر ({prod['price']} {CURRENCY})\n"
+            text += f"{status_dot} **{escape_md(prod['name'])}:** `{cnt}` رابط ({prod['price']} {CURRENCY})\n"
         text += "\n💡 لإضافة روابط جديدة، اضغط على زر '➕ إضافة روابط للمخزن'."
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_menu_keyboard(),
             parse_mode="Markdown",
@@ -188,9 +292,11 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Select product to add links
     if data == "adm_add_links":
+        await safe_answer(query)
         prods = await database.get_all_products(only_active=True)
         text = "➕ **إضافة روابط للمخزن:**\nيرجى اختيار الباقة التي تريد تزويد روابطها:"
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_select_product_for_stock(prods),
             parse_mode="Markdown",
@@ -199,35 +305,38 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Selected product for stock
     if data.startswith("adm_stock_for:"):
-        pid = data.split(":")[1]
+        await safe_answer(query)
+        pid = data.split(":", 1)[1]
         prod = await database.get_product_by_id(pid)
         if not prod:
-            await query.message.edit_text("⚠️ الباقة غير معروفة.")
+            await safe_edit_text(query.message, "⚠️ الباقة غير معروفة.")
             return
 
         context.bot_data[f"admin_add_stock_{user_id}"] = pid
         text = (
-            f"📥 **إضافة روابط لمخزن:** {prod['name']}\n\n"
+            f"📥 **إضافة روابط لمخزن:** {escape_md(prod['name'])}\n\n"
             "✍️ أرسل الروابط الآن في هذه المحادثة.\n"
             "• ضع **رابط واحد في كل سطر**.\n"
             "• يمكنك إرسال أي عدد من الروابط دفعة واحدة.\n\n"
             "لإلغاء العملية في أي وقت، أرسل: `/cancel_action`"
         )
-        await query.message.edit_text(text, parse_mode="Markdown")
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
         return
 
     # Cancel pending links
     if data == "adm_cancel_pending_links":
+        await safe_answer(query)
         context.bot_data.pop(f"admin_pending_links_{user_id}", None)
-        await query.message.edit_text("❌ تم إلغاء العملية ولم يتم حفظ الروابط.")
+        await safe_edit_text(query.message, "❌ تم إلغاء العملية ولم يتم حفظ الروابط.")
         return
 
     # Assign pending links to selected product
     if data.startswith("adm_assign_stock:"):
-        pid = data.split(":")[1]
+        await safe_answer(query, "⏳ جاري حفظ الروابط...")
+        pid = data.split(":", 1)[1]
         pending_links = context.bot_data.pop(f"admin_pending_links_{user_id}", [])
         if not pending_links:
-            await query.message.edit_text("⚠️ لم يتم العثور على روابط معلقة أو انتهت صلاحيتها.")
+            await safe_edit_text(query.message, "⚠️ لم يتم العثور على روابط معلقة أو انتهت صلاحيتها.")
             return
 
         added_count = await database.add_links_to_stock(pid, pending_links)
@@ -237,9 +346,10 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         counts = await database.get_stock_counts()
         curr_stock = counts.get(pid, 0)
 
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             f"🎉 **تمت إضافة الروابط بنجاح!**\n\n"
-            f"📦 المنتج: **{prod_name}**\n"
+            f"📦 المنتج: **{escape_md(prod_name)}**\n"
             f"➕ عدد الروابط المضافة: `{added_count}` رابط\n"
             f"📊 إجمالي المخزون الحالي للمنتج: `{curr_stock}` رابط متوفر\n"
             f"☁️ تم الحفظ والمزامنة السحابية بشكل دائم 🔒",
@@ -249,41 +359,157 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Pending Orders
     if data == "adm_pending":
-        pending = await database.get_pending_orders(limit=10)
+        await safe_answer(query, "⏳ جاري تحميل الطلبات المعلقة...")
+        pending = await database.get_pending_orders(limit=20)
         if not pending:
             text = "⏳ **الطلبات المعلقة:**\n\n🎉 لا توجد أي طلبات معلقة حالياً، جميع الطلبات تمت معالجتها!"
-            await query.message.edit_text(
+            kb = [
+                [InlineKeyboardButton("📋 عرض سجل جميع الطلبات", callback_data="adm_all_orders")],
+                [InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="adm_dashboard")],
+            ]
+            await safe_edit_text(
+                query.message,
                 text,
-                reply_markup=keyboards.get_admin_menu_keyboard(),
+                reply_markup=InlineKeyboardMarkup(kb),
                 parse_mode="Markdown",
             )
             return
 
-        text = "⏳ **الطلبات المعلقة قيد الانتظار:**\n─────────────────────\n"
+        text = f"⏳ **الطلبات المعلقة قيد الانتظار ({len(pending)}):**\n─────────────────────\n"
         buttons = []
         for p in pending:
+            ocode = p.get("order_code") or f"ORD-{p['id']:04d}"
+            uname = escape_md(p.get("user_name") or "عميل")
+            uuser = escape_md(p.get("user_username") or "بدون معرف")
+            pname = escape_md(p.get("product_name") or p.get("product_id"))
+            tnum = escape_md(p.get("transfer_number") or "غير محدد")
+            curr = escape_md(p.get("currency") or CURRENCY)
+            dt_str = format_dt(p.get("created_at"))
             text += (
-                f"🔹 **طلب:** `{p['order_code']}`\n"
-                f"• العميل: {p['user_name']} ({p['user_username']})\n"
-                f"• المنتج: {p['product_name']} (الكمية: {p['quantity']})\n"
-                f"• المبلغ: {p['total_price']} {p.get('currency', CURRENCY)}\n"
-                f"• رقم التحويل: `{p['transfer_number']}`\n"
-                f"• التاريخ: {p['created_at']}\n"
+                f"🔹 **طلب:** `{ocode}`\n"
+                f"• العميل: {uname} ({uuser}) | ID: `{p.get('user_id')}`\n"
+                f"• المنتج: {pname} (الكمية: `{p.get('quantity', 1)}`)\n"
+                f"• المبلغ: `{p.get('total_price')}` {curr} ({escape_md(p.get('payment_method', 'بريدي موب'))})\n"
+                f"• رقم التحويل: `{tnum}`\n"
+                f"• التاريخ: `{dt_str}`\n"
                 f"───────────────\n"
             )
+            short_user = (p.get("user_name") or "عميل")[:16]
             buttons.append([
-                InlineKeyboardButton(f"⚙️ إدارة طلب {p['order_code']}", callback_data=f"adm_manage_order:{p['id']}")
+                InlineKeyboardButton(
+                    f"⚙️ إدارة {ocode} — {short_user} ({p.get('total_price')} {p.get('currency', CURRENCY)})",
+                    callback_data=f"adm_manage_order:{p['id']}",
+                )
             ])
+        buttons.append([
+            InlineKeyboardButton("🔄 تحديث القائمة", callback_data="adm_pending"),
+            InlineKeyboardButton("📋 سجل جميع الطلبات", callback_data="adm_all_orders"),
+        ])
         buttons.append([InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="adm_dashboard")])
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown",
         )
         return
 
+    # All Recent Orders History
+    if data == "adm_all_orders":
+        await safe_answer(query, "📋 جاري جلب سجل الطلبات...")
+        orders = await database.get_recent_orders(limit=15)
+        if not orders:
+            text = "📋 **سجل الطلبات:**\n\nلا توجد أي طلبات مسجلة في قاعدة البيانات حتى الآن."
+            await safe_edit_text(
+                query.message,
+                text,
+                reply_markup=keyboards.get_admin_menu_keyboard(),
+                parse_mode="Markdown",
+            )
+            return
+
+        text = f"📋 **أحدث `{len(orders)}` طلب في المتجر:**\n─────────────────────\n"
+        buttons = []
+        for o in orders:
+            ocode = o.get("order_code") or f"ORD-{o['id']:04d}"
+            st = o.get("status", "PENDING")
+            st_badge = "⏳ معلق" if st == "PENDING" else ("✅ مقبول" if st == "APPROVED" else "❌ مرفوض")
+            uname = escape_md(o.get("user_name") or "عميل")
+            uuser = escape_md(o.get("user_username") or "")
+            pname = escape_md(o.get("product_name") or o.get("product_id"))
+            curr = escape_md(o.get("currency") or CURRENCY)
+            dt_str = format_dt(o.get("created_at"))
+            text += (
+                f"▪️ `{ocode}` | **{st_badge}**\n"
+                f"  👤 {uname} ({uuser}) — {pname} (`{o.get('total_price')}` {curr})\n"
+                f"  📅 `{dt_str}`\n"
+            )
+            short_user = (o.get("user_name") or "عميل")[:15]
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{'⏳' if st == 'PENDING' else ('✅' if st == 'APPROVED' else '❌')} {ocode} — {short_user}",
+                    callback_data=f"adm_manage_order:{o['id']}",
+                )
+            ])
+        buttons.append([
+            InlineKeyboardButton("⏳ الطلبات المعلقة فقط", callback_data="adm_pending"),
+            InlineKeyboardButton("🔙 لوحة التحكم", callback_data="adm_dashboard"),
+        ])
+        await safe_edit_text(
+            query.message,
+            text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown",
+        )
+        return
+
+    # View Receipt Photo for a Specific Order
+    if data.startswith("adm_receipt:"):
+        order_id = int(data.split(":", 1)[1])
+        order = await database.get_order_by_id(order_id)
+        if not order:
+            await safe_answer(query, "⚠️ الطلب غير موجود.", show_alert=True)
+            return
+
+        receipt_fid = order.get("receipt_file_id")
+        if not receipt_fid:
+            await safe_answer(query, "⚠️ لا توجد صورة إيصال مرفقة بهذا الطلب.", show_alert=True)
+            return
+
+        await safe_answer(query, "🖼️ جاري عرض صورة الإيصال...")
+        ocode = order.get("order_code") or f"ORD-{order_id:04d}"
+        caption = (
+            f"🖼️ **إيصال الدفع للطلب `{ocode}`**\n"
+            f"─────────────────\n"
+            f"👤 **العميل:** {escape_md(order.get('user_name'))} ({escape_md(order.get('user_username'))})\n"
+            f"🆔 **ID:** `{order.get('user_id')}`\n"
+            f"📦 **المنتج:** {escape_md(order.get('product_name'))} (x{order.get('quantity', 1)})\n"
+            f"💰 **المبلغ:** `{order.get('total_price')}` {escape_md(order.get('currency', CURRENCY))}\n"
+            f"💳 **طريقة الدفع:** {escape_md(order.get('payment_method', 'بريدي موب'))}\n"
+            f"🧾 **رقم التحويل:** `{escape_md(order.get('transfer_number'))}`\n"
+            f"📊 **الحالة:** `{order.get('status')}`"
+        )
+        try:
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=receipt_fid,
+                caption=caption,
+                reply_markup=keyboards.get_admin_order_keyboard(order_id),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            clean_cap = caption.replace("**", "").replace("`", "").replace("\\_", "_")
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=receipt_fid,
+                caption=clean_cap,
+                reply_markup=keyboards.get_admin_order_keyboard(order_id),
+            )
+        return
+
     # Edit Payment Info
     if data == "adm_edit_payment":
+        await safe_answer(query)
         current_info = await database.get_payment_info()
         context.bot_data[f"admin_edit_pay_{user_id}"] = True
         text = (
@@ -293,11 +519,12 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "✍️ **أرسل الآن النص الجديد لبيانات الدفع وطرق التحويل:**\n"
             "(يمكنك إلغاء العملية بكتابة `/cancel_action`)"
         )
-        await query.message.edit_text(text, parse_mode="Markdown")
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
         return
 
     # Proof Channel Dashboard
     if data == "adm_proof_channel":
+        await safe_answer(query)
         curr_chan = await database.get_proof_channel()
         has_chan = bool(curr_chan)
         chan_display = f"`{curr_chan}`" if has_chan else "❌ _غير مضبوطة حالياً_"
@@ -310,7 +537,8 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "⚠️ **مهم جداً:**\n"
             "يجب إضافة البوت كمشرف (Admin) داخل القناة مع منح صلاحية **نشر الرسائل (Post Messages)** لتتمكن من النشر."
         )
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_proof_channel_keyboard(has_channel=has_chan),
             parse_mode="Markdown",
@@ -319,6 +547,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Set Proof Channel Prompt
     if data == "adm_set_proof_channel":
+        await safe_answer(query)
         context.bot_data[f"admin_set_proof_chan_{user_id}"] = True
         text = (
             "✏️ **ضبط قناة الإثباتات:**\n\n"
@@ -328,15 +557,15 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "⚠️ تأكد من إضافة البوت كمشرف (Admin) داخل القناة أولاً!\n"
             "للإلغاء أرسل: `/cancel_action`"
         )
-        await query.message.edit_text(text, parse_mode="Markdown")
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
         return
 
     # Test Proof Channel
     if data == "adm_test_proof_channel":
-        await query.answer()
+        await safe_answer(query, "🧪 جاري إرسال منشور تجريبي...")
         curr_chan = await database.get_proof_channel()
         if not curr_chan:
-            await query.message.reply_text("⚠️ لا توجد قناة مضبوطة حالياً. يرجى ضبط القناة أولاً بالضغط على '✏️ ضبط / تغيير معرف القناة'.")
+            await safe_reply_text(query.message, "⚠️ لا توجد قناة مضبوطة حالياً. يرجى ضبط القناة أولاً بالضغط على '✏️ ضبط / تغيير معرف القناة'.")
             return
 
         try:
@@ -360,22 +589,24 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
                 reply_markup=test_markup,
                 parse_mode="Markdown",
             )
-            await query.message.reply_text(
+            await safe_reply_text(
+                query.message,
                 f"✅ **تم إرسال المنشور التجريبي بنجاح إلى القناة `{curr_chan}`!**\nتفضل بزيارة قناتك وستجد الرسالة منشورة الآن 🎉",
                 parse_mode="Markdown",
             )
         except Exception as e:
-            err_msg = str(e)
+            err_msg = escape_md(str(e))
             logger.error(f"Failed to send test proof to {curr_chan}: {e}")
             advice = ""
-            if "Chat not found" in err_msg:
+            if "Chat not found" in str(e):
                 advice = "💡 **السبب المحتمل:** معرف القناة غير صحيح، أو القناة خاصة. إذا كانت القناة خاصة، يجب استخدام الـ ID الرقمي (مثال: `-100...`)."
-            elif "bot is not a member" in err_msg or "administrator" in err_msg.lower():
+            elif "bot is not a member" in str(e) or "administrator" in str(e).lower():
                 advice = "💡 **السبب المحتمل:** البوت ليس مضافاً داخل القناة كـ **مشرف (Administrator)**. توجه للقناة وأضف البوت مشرفاً مع صلاحية نشر الرسائل."
-            elif "rights to send a message" in err_msg:
+            elif "rights to send a message" in str(e):
                 advice = "💡 **السبب المحتمل:** البوت موجود بالقناة ولكنه لا يملك صلاحية نشر الرسائل (Post Messages)."
 
-            await query.message.reply_text(
+            await safe_reply_text(
+                query.message,
                 f"⚠️ **تعذر إرسال المنشور التجريبي إلى القناة `{curr_chan}`!**\n\n"
                 f"❌ **رسالة الخطأ من تليجرام:**\n`{err_msg}`\n\n"
                 f"{advice}",
@@ -386,34 +617,32 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
     # Remove Proof Channel
     if data == "adm_remove_proof_channel":
         await database.update_proof_channel("")
-        await query.answer("🗑️ تم إلغاء ربط القناة.", show_alert=False)
+        await safe_answer(query, "🗑️ تم إلغاء ربط القناة.", show_alert=False)
         text = (
             "📢 **إدارة قناة إثباتات المبيعات (Proofs Channel):**\n"
             "─────────────────────\n"
             "• **القناة الحالية:** ❌ _تم إلغاء الربط_\n\n"
             "تم إيقاف النشر التلقائي للطلبات في القناة."
         )
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_proof_channel_keyboard(has_channel=False),
             parse_mode="Markdown",
         )
         return
 
-
-    # Check Supplier Balance & Stock (DigitalCore, LahaStore, and AccZone)
+    # Check Supplier Balance & Stock (DigitalCore, LahaStore, and AccZone in parallel)
     if data == "adm_supplier":
-        # 1. Primary Supplier: DigitalCore
-        dc_bal = await supplier_api.check_digitalcore_balance()
-        dc_stock = await supplier_api.get_digitalcore_stock()
-
-        # 2. Secondary Supplier: LahaStore
-        laha_bal = await supplier_api.check_supplier_balance()
-        laha_stock = await supplier_api.get_supplier_gemini_stock()
-
-        # 3. Backup Supplier: AccZone
-        acc_bal = await supplier_api.check_acczone_balance()
-        acc_stock = await supplier_api.get_acczone_gemini_stock()
+        await safe_answer(query, "🌐 جاري فحص أرصدة ومخزون الموردين...")
+        dc_bal, dc_stock, laha_bal, laha_stock, acc_bal, acc_stock = await asyncio.gather(
+            supplier_api.check_digitalcore_balance(),
+            supplier_api.get_digitalcore_stock(),
+            supplier_api.check_supplier_balance(),
+            supplier_api.get_supplier_gemini_stock(),
+            supplier_api.check_acczone_balance(),
+            supplier_api.get_acczone_gemini_stock(),
+        )
 
         text = "🌐 **بيانات ورصيد مزودي الروابط (APIs):**\n─────────────────────\n\n"
 
@@ -425,12 +654,12 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
                 f"• إجمالي الطلبات المنفذة: `{dc_bal.get('total_orders')}` طلب\n"
             )
         else:
-            text += f"• حالة الحساب: ⚠️ {dc_bal.get('error')}\n"
+            text += f"• حالة الحساب: ⚠️ {escape_md(dc_bal.get('error'))}\n"
 
         if dc_stock.get("ok"):
             prods_dc = dc_stock.get("products", [])
             for p in prods_dc[:7]:
-                p_name = p.get("name", "")
+                p_name = escape_md(p.get("name", ""))
                 p_stock = p.get("stock", 0)
                 p_price = p.get("price", 0.0)
                 text += f"  - {p_name}: `{p_stock}` متوفر (${p_price})\n"
@@ -447,12 +676,12 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
                 f"• رصيد المحفظة: `{laha_bal.get('balance_usd_text')}` ({laha_bal.get('balance_vnd_text')})\n"
             )
         else:
-            text += f"• حالة الحساب: ⚠️ {laha_bal.get('error')}\n"
+            text += f"• حالة الحساب: ⚠️ {escape_md(laha_bal.get('error'))}\n"
 
         if laha_stock.get("ok"):
             items = laha_stock.get("items", [])
             for itm in items:
-                text += f"  - {itm.get('name')}: `{itm.get('stock')}` متوفر (${itm.get('priceUsd')})\n"
+                text += f"  - {escape_md(itm.get('name'))}: `{itm.get('stock')}` متوفر (${itm.get('priceUsd')})\n"
         else:
             text += "  - تعذر فحص مخزون LahaStore.\n"
 
@@ -462,16 +691,16 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         text += "🥉 **3. المورد الثالث (AccZone API):**\n"
         if acc_bal.get("ok"):
             text += (
-                f"• المستخدم: `{acc_bal.get('username')}`\n"
+                f"• المستخدم: `{escape_md(acc_bal.get('username'))}`\n"
                 f"• رصيد المحفظة: `{acc_bal.get('balance_text')}`\n"
             )
         else:
-            text += f"• حالة الحساب: ⚠️ {acc_bal.get('error')}\n"
+            text += f"• حالة الحساب: ⚠️ {escape_md(acc_bal.get('error'))}\n"
 
         if acc_stock.get("ok"):
             items = acc_stock.get("items", [])
             for itm in items:
-                text += f"  - {itm.get('name')}: `{itm.get('stock')}` متوفر (${itm.get('price')})\n"
+                text += f"  - {escape_md(itm.get('name'))}: `{itm.get('stock')}` متوفر (${itm.get('price')})\n"
         else:
             text += "  - تعذر فحص مخزون AccZone.\n"
 
@@ -484,7 +713,8 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "4. إذا تعذرت جميع السيرفرات، يطلب منك إدخال الرابط يدوياً.\n"
         )
 
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             text,
             reply_markup=keyboards.get_admin_menu_keyboard(),
             parse_mode="Markdown",
@@ -493,7 +723,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Sync & Scan Supplier Products (APIs)
     if data == "adm_sync_apis":
-        await query.answer("🔄 جاري فحص ومزامنة منتجات الموردين...")
+        await safe_answer(query, "🔄 جاري فحص ومزامنة منتجات الموردين...")
         loading_text = (
             "🔄 **جاري فحص الموردين ومزامنة المنتجات...**\n\n"
             "• فحص كتالوج DigitalCore API...\n"
@@ -501,19 +731,18 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "• فحص خدمات AccZone API...\n"
             "يرجى الانتظار بضع ثوانٍ ⏳"
         )
-        try:
-            await query.message.edit_text(loading_text, parse_mode="Markdown")
-        except Exception:
-            pass
+        await safe_edit_text(query.message, loading_text, parse_mode="Markdown")
 
         new_items = await supplier_api.sync_new_supplier_products(bot=context.bot)
 
-        # Live counts
-        dc_stock = await supplier_api.get_digitalcore_stock()
+        # Live counts in parallel
+        dc_stock, laha_stock, acc_stock = await asyncio.gather(
+            supplier_api.get_digitalcore_stock(),
+            supplier_api.get_lahastore_all_products(),
+            supplier_api.get_acczone_all_services(),
+        )
         dc_count = len(dc_stock.get("products", [])) if dc_stock.get("ok") else 0
-        laha_stock = await supplier_api.get_lahastore_all_products()
         laha_count = len(laha_stock.get("products", [])) if laha_stock.get("ok") else 0
-        acc_stock = await supplier_api.get_acczone_all_services()
         acc_count = len(acc_stock.get("services", [])) if acc_stock.get("ok") else 0
 
         res_text = (
@@ -528,7 +757,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             res_text += f"🆕 **تم اكتشاف وإضافة `{len(new_items)}` منتج جديد للمتجر تلقائياً:**\n\n"
             for itm in new_items:
                 res_text += (
-                    f"• **{itm['name']}** ({itm['supplier']})\n"
+                    f"• **{escape_md(itm['name'])}** ({escape_md(itm['supplier'])})\n"
                     f"  سعر الجملة: `${itm['wholesale']}` | سعر البيع: `{itm['price_dzd']} دج` (${itm['price_usd']})\n"
                     f"  المخزون: `{itm['stock']}` قطعة | القسم: `{itm['category']}`\n\n"
                 )
@@ -536,7 +765,8 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         else:
             res_text += "✅ **جميع المنتجات لدى الموردين مسجلة ومحدثة في قاعدة البيانات مسبقاً!**\nلا توجد منتجات جديدة غير مضافة حالياً."
 
-        await query.message.edit_text(
+        await safe_edit_text(
+            query.message,
             res_text,
             reply_markup=keyboards.get_admin_menu_keyboard(),
             parse_mode="Markdown",
@@ -545,13 +775,14 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Approve Order Clicked
     if data.startswith("adm_appr:"):
-        order_id = int(data.split(":")[1])
+        order_id = int(data.split(":", 1)[1])
         await process_order_approval(update, context, order_id)
         return
 
     # Reject Order Clicked
     if data.startswith("adm_rej:"):
-        order_id = int(data.split(":")[1])
+        await safe_answer(query)
+        order_id = int(data.split(":", 1)[1])
         context.bot_data[f"admin_reject_order_{user_id}"] = order_id
         text = (
             f"❌ **رفض الطلب رقم `{order_id}`:**\n\n"
@@ -559,32 +790,41 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "• أو أرسل `/skip_reason` لإرسال الرفض بدون تفاصيل.\n"
             "• لإلغاء الرفض أرسل `/cancel_action`."
         )
-        await query.message.reply_text(text, parse_mode="Markdown")
+        await safe_reply_text(query.message, text, parse_mode="Markdown")
         return
 
-    # Manage specific pending order from admin panel
+    # Manage specific order from admin panel
     if data.startswith("adm_manage_order:"):
-        order_id = int(data.split(":")[1])
+        order_id = int(data.split(":", 1)[1])
         order = await database.get_order_by_id(order_id)
         if not order:
-            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            await safe_answer(query, "⚠️ الطلب غير موجود.", show_alert=True)
             return
 
-        status_text = "⏳ معلق قيد الانتظار" if order["status"] == "PENDING" else order["status"]
-        text = (
-            f"📦 **إدارة الطلب رقم `{order['order_code']}`:**\n"
-            f"─────────────────────\n"
-            f"👤 **العميل:** {order['user_name']} (`{order['user_id']}`)\n"
-            f"🛍 **المنتج:** {order['product_name']}\n"
-            f"🔢 **الكمية:** {order['quantity']}\n"
-            f"💰 **المبلغ:** {order['total_price']} {order.get('currency', CURRENCY)}\n"
-            f"💳 **طريقة الدفع:** {order.get('payment_method', 'بريدي موب')}\n"
-            f"🧾 **رقم التحويل:** `{order.get('transfer_number')}`\n"
-            f"📊 **الحالة:** {status_text}\n"
-            f"📅 **التاريخ:** {order['created_at']}\n"
-            f"─────────────────────\n"
-            "اختر الإجراء المطلوب بالأسفل 👇"
+        await safe_answer(query)
+        st = order.get("status", "PENDING")
+        status_text = (
+            "⏳ معلق قيد الانتظار" if st == "PENDING"
+            else ("✅ مقبول ومكتمل" if st == "APPROVED" else f"❌ مرفوض ({escape_md(order.get('reject_reason', ''))})")
         )
+        ocode = order.get("order_code") or f"ORD-{order_id:04d}"
+        text = (
+            f"📦 **إدارة الطلب رقم `{ocode}`:**\n"
+            f"─────────────────────\n"
+            f"👤 **العميل:** {escape_md(order.get('user_name'))} ({escape_md(order.get('user_username'))})\n"
+            f"🆔 **معرف العميل (ID):** `{order.get('user_id')}`\n"
+            f"🛍 **المنتج:** {escape_md(order.get('product_name'))}\n"
+            f"🔢 **الكمية:** `{order.get('quantity', 1)}`\n"
+            f"💰 **المبلغ:** `{order.get('total_price')}` {escape_md(order.get('currency', CURRENCY))}\n"
+            f"💳 **طريقة الدفع:** {escape_md(order.get('payment_method', 'بريدي موب'))}\n"
+            f"🧾 **رقم التحويل:** `{escape_md(order.get('transfer_number'))}`\n"
+            f"📊 **الحالة:** {status_text}\n"
+            f"📅 **التاريخ:** `{format_dt(order.get('created_at'))}`\n"
+        )
+        if st == "APPROVED" and order.get("delivered_links"):
+            text += f"🔗 **الروابط المسلمة:**\n`{escape_md(order.get('delivered_links'))}`\n"
+        text += "─────────────────────\nاختر الإجراء المطلوب بالأسفل 👇"
+
         kb = [
             [
                 InlineKeyboardButton("✅ قبول وتسليم تلقائي", callback_data=f"adm_appr:{order_id}"),
@@ -595,24 +835,31 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
                 InlineKeyboardButton("💬 مراسلة العميل", callback_data=f"adm_msg:{order_id}"),
             ],
             [
+                InlineKeyboardButton("🖼️ عرض صورة الإيصال", callback_data=f"adm_receipt:{order_id}"),
                 InlineKeyboardButton("❌ رفض الطلب", callback_data=f"adm_rej:{order_id}"),
-                InlineKeyboardButton("🔙 رجوع للطلبات المعلقة", callback_data="adm_pending"),
+            ],
+            [
+                InlineKeyboardButton("⏳ الطلبات المعلقة", callback_data="adm_pending"),
+                InlineKeyboardButton("📋 سجل الطلبات", callback_data="adm_all_orders"),
+            ],
+            [
+                InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="adm_dashboard"),
             ],
         ]
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        await safe_edit_text(query.message, text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return
 
     # Notify Customer: Order In Preparation / Please Wait
     if data.startswith("adm_wait:"):
-        order_id = int(data.split(":")[1])
+        order_id = int(data.split(":", 1)[1])
         order = await database.get_order_by_id(order_id)
         if not order:
-            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            await safe_answer(query, "⚠️ الطلب غير موجود.", show_alert=True)
             return
 
         cust_user_id = order["user_id"]
         order_code = order["order_code"]
-        prod_name = order["product_name"]
+        prod_name = escape_md(order["product_name"])
 
         wait_msg = (
             f"⏳ **مرحباً بك عزيزي العميل!**\n\n"
@@ -624,39 +871,42 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             f"شاكرين لصبرك وحسن تعاملك معنا! 🌟"
         )
         try:
-            await context.bot.send_message(
+            await safe_send_message(
+                context.bot,
                 chat_id=cust_user_id,
                 text=wait_msg,
                 parse_mode="Markdown",
             )
-            await query.answer("✅ تم إرسال إشعار 'طلبك قيد التجهيز' للعميل بنجاح!", show_alert=True)
-            await query.message.reply_text(
+            await safe_answer(query, "✅ تم إرسال إشعار 'طلبك قيد التجهيز' للعميل بنجاح!", show_alert=True)
+            await safe_reply_text(
+                query.message,
                 f"⏳ **تم إشعار العميل بنجاح بأن طلبه قيد التجهيز!**\n\n"
-                f"👤 العميل: **{order['user_name']}** (`{cust_user_id}`)\n"
+                f"👤 العميل: **{escape_md(order['user_name'])}** (`{cust_user_id}`)\n"
                 f"🔖 الطلب: `{order_code}`\n\n"
                 f"العميل الآن يعلم أن طلبه قيد الشراء والتجهيز. عندما تجهز الرابط/الحساب يمكنك الضغط على **'✍️ تسليم يدوي'** أو **'✅ قبول وتسليم تلقائي'**.",
                 parse_mode="Markdown",
             )
         except Exception as e:
             logger.error(f"Failed to send wait notification to {cust_user_id}: {e}")
-            await query.answer(f"⚠️ تعذر إرسال الإشعار للعميل: {e}", show_alert=True)
+            await safe_answer(query, f"⚠️ تعذر إرسال الإشعار للعميل: {e}", show_alert=True)
         return
 
     # Custom Message to Customer for specific order
     if data.startswith("adm_msg:"):
-        order_id = int(data.split(":")[1])
+        order_id = int(data.split(":", 1)[1])
         order = await database.get_order_by_id(order_id)
         if not order:
-            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            await safe_answer(query, "⚠️ الطلب غير موجود.", show_alert=True)
             return
 
         context.bot_data[f"admin_custom_msg_{user_id}"] = order_id
-        await query.answer()
-        await query.message.reply_text(
+        await safe_answer(query)
+        await safe_reply_text(
+            query.message,
             f"💬 **مراسلة مخصصة للعميل (طلب `{order['order_code']}`):**\n"
             f"─────────────────────\n"
-            f"👤 العميل: **{order['user_name']}** (`{order['user_id']}`)\n"
-            f"📦 المنتج: **{order['product_name']}**\n\n"
+            f"👤 العميل: **{escape_md(order['user_name'])}** (`{order['user_id']}`)\n"
+            f"📦 المنتج: **{escape_md(order['product_name'])}**\n\n"
             f"✍️ **أرسل الآن نص الرسالة التي تريد توجيهها للعميل:**\n"
             f"(مثال: 'السلام عليكم، جاري تجهيز اشتراكك نحتاج 15 دقيقة' أو 'يرجى إرسال إيميلك لتفعيل الحساب').\n\n"
             f"• لإلغاء المراسلة أرسل: `/cancel_action`",
@@ -666,23 +916,24 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Direct Manual Delivery (bypassing APIs)
     if data.startswith("adm_manual_deliver:"):
-        order_id = int(data.split(":")[1])
+        order_id = int(data.split(":", 1)[1])
         order = await database.get_order_by_id(order_id)
         if not order:
-            await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+            await safe_answer(query, "⚠️ الطلب غير موجود.", show_alert=True)
             return
 
         if order["status"] != "PENDING":
-            await query.answer(f"⚠️ هذا الطلب تمت معالجته مسبقاً ({order['status']}).", show_alert=True)
+            await safe_answer(query, f"⚠️ هذا الطلب تمت معالجته مسبقاً ({order['status']}).", show_alert=True)
             return
 
         context.bot_data[f"admin_manual_order_{user_id}"] = order_id
-        await query.answer()
-        await query.message.reply_text(
+        await safe_answer(query)
+        await safe_reply_text(
+            query.message,
             f"✍️ **تسليم يدوي مباشر للطلب `{order['order_code']}`:**\n"
             f"─────────────────────\n"
-            f"👤 العميل: **{order['user_name']}** (`{order['user_id']}`)\n"
-            f"📦 المنتج: **{order['product_name']}**\n"
+            f"👤 العميل: **{escape_md(order['user_name'])}** (`{order['user_id']}`)\n"
+            f"📦 المنتج: **{escape_md(order['product_name'])}**\n"
             f"🔢 الكمية المطلوبة: `{order['quantity']}`\n\n"
             f"📥 **أرسل الآن رابط أو بيانات الاشتراك في رسالة:**\n"
             f"(إذا كانت الكمية أكثر من 1، ضع كل رابط في سطر منفصل).\n\n"
@@ -693,10 +944,11 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
     # Direct Reply to a Customer User ID
     if data.startswith("adm_reply_user:"):
-        target_uid = int(data.split(":")[1])
+        target_uid = int(data.split(":", 1)[1])
         context.bot_data[f"admin_reply_user_{user_id}"] = target_uid
-        await query.answer()
-        await query.message.reply_text(
+        await safe_answer(query)
+        await safe_reply_text(
+            query.message,
             f"💬 **كتابة رد مباشر للعميل (`{target_uid}`):**\n\n"
             f"✍️ أرسل رسالتك الآن في هذه المحادثة وسيتم تسليمها للعميل فوراً.\n"
             f"• لإلغاء المراسلة: `/cancel_action`",
@@ -704,6 +956,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
+    await safe_answer(query)
 
 
 # ==================== معالجة قبول الطلب (Hybrid: Stock -> LahaStore -> AccZone -> Manual) ====================
@@ -718,13 +971,14 @@ async def process_order_approval(
 
     order = await database.get_order_by_id(order_id)
     if not order:
-        await query.answer("⚠️ الطلب غير موجود.", show_alert=True)
+        await safe_answer(query, "⚠️ الطلب غير موجود.", show_alert=True)
         return
 
     if order["status"] != "PENDING":
-        await query.answer(f"⚠️ هذا الطلب تمت معالجته مسبقاً ({order['status']}).", show_alert=True)
+        await safe_answer(query, f"⚠️ هذا الطلب تمت معالجته مسبقاً ({order['status']}).", show_alert=True)
         return
 
+    await safe_answer(query, "⏳ جاري معالجة الطلب وتسليم الاشتراك...")
     product_id = order["product_id"]
     quantity = order["quantity"]
 
@@ -741,24 +995,25 @@ async def process_order_approval(
         success_caption = (
             f"✅ **تم قبول الطلب `{order['order_code']}` بنجاح!**\n"
             f"⚡️ تم تسليم `{quantity}` رابط تلقائياً من **المخزن المحلي**.\n"
-            f"👤 العميل: {order['user_name']} (`{order['user_id']}`)\n"
-            f"📦 المنتج: {order['product_name']}\n"
-            f"💳 طريقة الدفع: {order.get('payment_method', 'بريدي موب')}\n"
-            f"💰 المبلغ المحصل: {order['total_price']} {order.get('currency', CURRENCY)}"
+            f"👤 العميل: {escape_md(order['user_name'])} (`{order['user_id']}`)\n"
+            f"📦 المنتج: {escape_md(order['product_name'])}\n"
+            f"💳 طريقة الدفع: {escape_md(order.get('payment_method', 'بريدي موب'))}\n"
+            f"💰 المبلغ المحصل: {order['total_price']} {escape_md(order.get('currency', CURRENCY))}"
         )
         try:
-            await query.message.edit_caption(
-                caption=success_caption,
-                parse_mode="Markdown",
-                reply_markup=None,
-            )
+            if getattr(query.message, "photo", None):
+                await query.message.edit_caption(
+                    caption=success_caption,
+                    parse_mode="Markdown",
+                    reply_markup=None,
+                )
+            else:
+                await safe_edit_text(query.message, success_caption, reply_markup=None, parse_mode="Markdown")
         except Exception:
-            await query.message.reply_text(success_caption, parse_mode="Markdown")
-
-        await query.answer("✅ تم التسليم من المخزن المحلي بنجاح!", show_alert=False)
+            await safe_reply_text(query.message, success_caption, parse_mode="Markdown")
         return
 
-    # --- 2. المحاولة الثانية: الشراء التلقائي عبر API (LahaStore أولاً ثم AccZone كبديل) ---
+    # --- 2. المحاولة الثانية: الشراء التلقائي عبر API (DigitalCore -> AccZone -> LahaStore) ---
     api_success, api_links, api_msg, provider_used = await supplier_api.purchase_with_fallback(
         local_product_id=product_id,
         quantity=quantity,
@@ -771,22 +1026,23 @@ async def process_order_approval(
 
         success_caption = (
             f"✅ **تم قبول الطلب `{order['order_code']}` بنجاح!**\n"
-            f"⚡️ تم سحب `{quantity}` رابط وتوليده تلقائياً عبر **API المورد ({provider_used})**.\n"
-            f"👤 العميل: {order['user_name']} (`{order['user_id']}`)\n"
-            f"📦 المنتج: {order['product_name']}\n"
-            f"💳 طريقة الدفع: {order.get('payment_method', 'بريدي موب')}\n"
-            f"💰 المبلغ المحصل: {order['total_price']} {order.get('currency', CURRENCY)}"
+            f"⚡️ تم سحب `{quantity}` رابط وتوليده تلقائياً عبر **API المورد ({escape_md(provider_used)})**.\n"
+            f"👤 العميل: {escape_md(order['user_name'])} (`{order['user_id']}`)\n"
+            f"📦 المنتج: {escape_md(order['product_name'])}\n"
+            f"💳 طريقة الدفع: {escape_md(order.get('payment_method', 'بريدي موب'))}\n"
+            f"💰 المبلغ المحصل: {order['total_price']} {escape_md(order.get('currency', CURRENCY))}"
         )
         try:
-            await query.message.edit_caption(
-                caption=success_caption,
-                parse_mode="Markdown",
-                reply_markup=None,
-            )
+            if getattr(query.message, "photo", None):
+                await query.message.edit_caption(
+                    caption=success_caption,
+                    parse_mode="Markdown",
+                    reply_markup=None,
+                )
+            else:
+                await safe_edit_text(query.message, success_caption, reply_markup=None, parse_mode="Markdown")
         except Exception:
-            await query.message.reply_text(success_caption, parse_mode="Markdown")
-
-        await query.answer(f"✅ تم الشراء والتسليم عبر {provider_used} بنجاح!", show_alert=False)
+            await safe_reply_text(query.message, success_caption, parse_mode="Markdown")
         return
 
     # --- 3. المحاولة الثالثة: طلب الرابط يدوياً من الأدمن (في حال عدم توفره بالمخزن وبكلا الموردين) ---
@@ -794,13 +1050,12 @@ async def process_order_approval(
     alert_text = (
         f"⚠️ **تنبيه: تعذر التسليم التلقائي للطلب `{order['order_code']}`!**\n\n"
         f"• المخزن المحلي: متوفر `{len(available_links)}` فقط (المطلوب: `{quantity}`).\n"
-        f"• نتيجة الموردين (APIs): {api_msg}\n\n"
+        f"• نتيجة الموردين (APIs): {escape_md(api_msg)}\n\n"
         f"✍️ **يرجى إرسال رابط التفعيل يدوياً الآن في هذه المحادثة:**\n"
         f"(إذا كانت الكمية أكثر من 1، يمكنك وضع كل رابط في سطر منفصل).\n\n"
         "لإلغاء العملية أرسل: `/cancel_action`"
     )
-    await query.message.reply_text(alert_text, parse_mode="Markdown")
-    await query.answer("⚠️ يرجى إدخال الرابط يدوياً (المخازن والموردين غير متاحين حالياً).", show_alert=True)
+    await safe_reply_text(query.message, alert_text, parse_mode="Markdown")
 
 
 def format_masked_user_id(user_id: int) -> str:
@@ -820,9 +1075,9 @@ async def post_order_proof_to_channel(context: ContextTypes.DEFAULT_TYPE, order:
         return
 
     masked_by = format_masked_user_id(order.get("user_id", 0))
-    plan_name = order.get("product_name", "Gemini Pro — 18 Months (Links)")
+    plan_name = escape_md(order.get("product_name", "Gemini Pro — 18 Months (Links)"))
     quantity = order.get("quantity", 1)
-    order_code = order.get("order_code", "ORDER")
+    order_code = escape_md(order.get("order_code", "ORDER"))
 
     bot_username = ""
     try:
@@ -848,7 +1103,8 @@ async def post_order_proof_to_channel(context: ContextTypes.DEFAULT_TYPE, order:
 
     try:
         chat_id_target = int(channel) if (channel.startswith("-") and channel[1:].isdigit()) else channel
-        await context.bot.send_message(
+        await safe_send_message(
+            context.bot,
             chat_id=chat_id_target,
             text=proof_text,
             reply_markup=reply_markup,
@@ -873,7 +1129,8 @@ async def deliver_links_to_customer(
     for idx, l in enumerate(links, 1):
         is_url = l.startswith("http://") or l.startswith("https://")
         header = f"🔗 **رابط التفعيل #{idx}:**" if is_url else f"🔑 **بيانات / كود التفعيل #{idx}:**"
-        items_formatted += f"{header}\n`{l}`\n\n"
+        clean_l = l.replace("`", "")
+        items_formatted += f"{header}\n`{clean_l}`\n\n"
 
     # Tailor instructions depending on whether it's Gemini or other digital products
     if "gemini" in prod_id.lower() or "gemini" in product_name.lower():
@@ -895,7 +1152,7 @@ async def deliver_links_to_customer(
         f"🎉 **مبروك! تم تأكيد وقبول عملية الدفع لطلبك بنجاح!**\n"
         f"─────────────────────\n"
         f"🔹 **رقم الطلب:** `{order['order_code']}`\n"
-        f"📦 **المنتج:** {product_name}\n"
+        f"📦 **المنتج:** {escape_md(product_name)}\n"
         f"🔢 **الكمية:** {order['quantity']}\n"
         f"─────────────────────\n\n"
         f"{items_formatted}"
@@ -904,7 +1161,8 @@ async def deliver_links_to_customer(
     )
 
     try:
-        await context.bot.send_message(
+        await safe_send_message(
+            context.bot,
             chat_id=user_id,
             text=customer_msg,
             parse_mode="Markdown",
@@ -917,7 +1175,6 @@ async def deliver_links_to_customer(
         await post_order_proof_to_channel(context, order)
     except Exception as e:
         logger.warning(f"Error posting proof to channel: {e}")
-
 
 
 # ==================== معالج النصوص الخاصة بالمسؤول ====================
@@ -957,20 +1214,22 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         order_code = order["order_code"]
         cust_msg = (
             f"📩 **رسالة من إدارة المتجر بخصوص طلبك `{order_code}`:**\n\n"
-            f"{text}\n\n"
+            f"{escape_md(text)}\n\n"
             f"─────────────────\n"
             f"💬 يمكنك الرد مباشرة على هذه الرسالة إذا طُلب منك أي معلومات أو استفسار."
         )
         try:
-            await context.bot.send_message(
+            await safe_send_message(
+                context.bot,
                 chat_id=cust_uid,
                 text=cust_msg,
                 parse_mode="Markdown",
             )
             context.bot_data.pop(f"admin_custom_msg_{user_id}", None)
-            await update.message.reply_text(
-                f"✅ **تم إرسال رسالتك بنجاح للعميل {order['user_name']}!**\n\n"
-                f"📌 **نص الرسالة المرسلة:**\n_{text}_",
+            await safe_reply_text(
+                update.message,
+                f"✅ **تم إرسال رسالتك بنجاح للعميل {escape_md(order['user_name'])}!**\n\n"
+                f"📌 **نص الرسالة المرسلة:**\n{escape_md(text)}",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -982,20 +1241,22 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
     if reply_target_uid:
         cust_msg = (
             f"📩 **رسالة من إدارة المتجر:**\n\n"
-            f"{text}\n\n"
+            f"{escape_md(text)}\n\n"
             f"─────────────────\n"
             f"💬 يمكنك الرد مباشرة على هذه الرسالة."
         )
         try:
-            await context.bot.send_message(
+            await safe_send_message(
+                context.bot,
                 chat_id=reply_target_uid,
                 text=cust_msg,
                 parse_mode="Markdown",
             )
             context.bot_data.pop(f"admin_reply_user_{user_id}", None)
-            await update.message.reply_text(
+            await safe_reply_text(
+                update.message,
                 f"✅ **تم إرسال الرد إلى العميل (`{reply_target_uid}`) بنجاح!**\n\n"
-                f"📌 **نص الرسالة:**\n_{text}_",
+                f"📌 **نص الرسالة:**\n{escape_md(text)}",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -1014,7 +1275,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         if m_id:
             target_uid = int(m_id.group(1))
 
-        m_order = re.search(r"(ORDER[0-9A-Z]+)", search_text)
+        m_order = re.search(r"((?:ORD-|ORDER)[0-9A-Z]+)", search_text)
         if m_order:
             target_order_code = m_order.group(1)
 
@@ -1022,24 +1283,25 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             prefix = f" بخصوص طلبك `{target_order_code}`" if target_order_code else ""
             cust_msg = (
                 f"📩 **رسالة من إدارة المتجر{prefix}:**\n\n"
-                f"{text}\n\n"
+                f"{escape_md(text)}\n\n"
                 f"─────────────────\n"
                 f"💬 يمكنك الرد مباشرة على هذه الرسالة."
             )
             try:
-                await context.bot.send_message(
+                await safe_send_message(
+                    context.bot,
                     chat_id=target_uid,
                     text=cust_msg,
                     parse_mode="Markdown",
                 )
-                await update.message.reply_text(
+                await safe_reply_text(
+                    update.message,
                     f"✅ **تم تسليم ردك مباشرة إلى العميل (`{target_uid}`)!**",
                     parse_mode="Markdown",
                 )
                 return
             except Exception as e:
                 logger.warning(f"Failed to send direct reply to {target_uid}: {e}")
-
 
     # 1. Awaiting new price for product
     edit_price_pid = context.bot_data.get(f"admin_set_price_{user_id}")
@@ -1052,9 +1314,10 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             await database.update_product_price(edit_price_pid, new_price)
             prod = await database.get_product_by_id(edit_price_pid)
             context.bot_data.pop(f"admin_set_price_{user_id}", None)
-            await update.message.reply_text(
+            await safe_reply_text(
+                update.message,
                 f"✅ **تم تحديث السعر بنجاح!**\n"
-                f"المنتج: **{prod['name'] if prod else edit_price_pid}** أصبح بسعر `{new_price}` {CURRENCY}.",
+                f"المنتج: **{escape_md(prod['name'] if prod else edit_price_pid)}** أصبح بسعر `{new_price}` {CURRENCY}.",
                 parse_mode="Markdown",
             )
             return
@@ -1070,9 +1333,10 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             add_prod_state["name"] = text
             add_prod_state["step"] = 2
             context.bot_data[f"admin_add_prod_step_{user_id}"] = add_prod_state
-            await update.message.reply_text(
+            await safe_reply_text(
+                update.message,
                 "➕ **إضافة منتج جديد (الخطوة 2 من 3):**\n\n"
-                f"الاسم: **{text}**\n"
+                f"الاسم: **{escape_md(text)}**\n"
                 "✍️ الآن أرسل **السعر بالدينار** (أرقام فقط، مثال: `1500`):",
                 parse_mode="Markdown",
             )
@@ -1086,7 +1350,8 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
                 add_prod_state["price"] = price
                 add_prod_state["step"] = 3
                 context.bot_data[f"admin_add_prod_step_{user_id}"] = add_prod_state
-                await update.message.reply_text(
+                await safe_reply_text(
+                    update.message,
                     "➕ **إضافة منتج جديد (الخطوة 3 من 3):**\n\n"
                     f"السعر: `{price}` {CURRENCY}\n"
                     "✍️ الآن أرسل **وصف مختصر للمنتج** (أو أرسل `/skip_desc` للمتابعة بدون وصف):",
@@ -1111,11 +1376,12 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
                 supplier_product_id=None,
             )
             context.bot_data.pop(f"admin_add_prod_step_{user_id}", None)
-            await update.message.reply_text(
+            await safe_reply_text(
+                update.message,
                 f"🎉 **تمت إضافة المنتج الجديد بنجاح!**\n\n"
-                f"📦 **الاسم:** {name}\n"
+                f"📦 **الاسم:** {escape_md(name)}\n"
                 f"💵 **السعر:** `{price}` {CURRENCY}\n"
-                f"📝 **الوصف:** {desc}\n\n"
+                f"📝 **الوصف:** {escape_md(desc)}\n\n"
                 "أصبح المنتج متاحاً فوراً لجميع الزبائن في قائمة الشراء! 🚀",
                 parse_mode="Markdown",
             )
@@ -1139,7 +1405,8 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         await deliver_links_to_customer(context, order, lines)
 
         context.bot_data.pop(f"admin_manual_order_{user_id}", None)
-        await update.message.reply_text(
+        await safe_reply_text(
+            update.message,
             f"✅ **تم إرسال الروابط للعميل بنجاح واكتمال الطلب `{order['order_code']}`!**",
             parse_mode="Markdown",
         )
@@ -1155,21 +1422,23 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             await database.mark_order_rejected(reject_order_id, reason)
             cust_text = (
                 f"❌ **نعتذر منك، تم رفض طلبك رقم `{order['order_code']}`.**\n\n"
-                f"⚠️ **السبب:** {reason}\n\n"
+                f"⚠️ **السبب:** {escape_md(reason)}\n\n"
                 "إذا كنت ترى أن هناك خطأ أو ترغب في إعادة المحاولة، يرجى مراجعة إشعار التحويل أو التواصل معنا."
             )
             try:
-                await context.bot.send_message(
+                await safe_send_message(
+                    context.bot,
                     chat_id=order["user_id"],
                     text=cust_text,
                     parse_mode="Markdown",
                 )
             except Exception as e:
-                print(f"Could not notify user of rejection: {e}")
+                logger.error(f"Could not notify user of rejection: {e}")
 
         context.bot_data.pop(f"admin_reject_order_{user_id}", None)
-        await update.message.reply_text(
-            f"✅ تم رفض الطلب وتسجيل السبب وإشعار العميل.",
+        await safe_reply_text(
+            update.message,
+            "✅ تم رفض الطلب وتسجيل السبب وإشعار العميل.",
             parse_mode="Markdown",
         )
         return
@@ -1189,9 +1458,10 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         context.bot_data.pop(f"admin_add_stock_{user_id}", None)
         counts = await database.get_stock_counts()
         curr_stock = counts.get(stock_product_id, 0)
-        await update.message.reply_text(
+        await safe_reply_text(
+            update.message,
             f"🎉 **تمت الإضافة بنجاح!**\n\n"
-            f"📦 المنتج: **{prod_name}**\n"
+            f"📦 المنتج: **{escape_md(prod_name)}**\n"
             f"➕ عدد الروابط المضافة: `{added_count}` رابط\n"
             f"📊 إجمالي المخزون الحالي للمنتج: `{curr_stock}` رابط متوفر\n"
             f"☁️ تم الحفظ والمزامنة السحابية بشكل دائم 🔒",
@@ -1203,7 +1473,8 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
     if context.bot_data.get(f"admin_edit_pay_{user_id}"):
         await database.update_payment_info(text)
         context.bot_data.pop(f"admin_edit_pay_{user_id}", None)
-        await update.message.reply_text(
+        await safe_reply_text(
+            update.message,
             "✅ **تم تحديث بيانات وطرق الدفع بنجاح!**\nستظهر الآن الصيغة الجديدة لجميع العملاء.",
             parse_mode="Markdown",
         )
@@ -1233,12 +1504,13 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         try:
             chat_id_target = int(clean_chan) if (clean_chan.startswith("-") and clean_chan[1:].isdigit()) else clean_chan
             chat_obj = await context.bot.get_chat(chat_id_target)
-            title = chat_obj.title or clean_chan
+            title = escape_md(chat_obj.title or clean_chan)
             title_info = f"\n📢 اسم القناة: **{title}**"
-        except Exception as e:
-            title_info = f"\n⚠️ تذكير: تأكد من إضافة البوت كمشرف (Admin) في القناة بصلاحية نشر الرسائل لكي يتمكن من إرسال الإثباتات."
+        except Exception:
+            title_info = "\n⚠️ تذكير: تأكد من إضافة البوت كمشرف (Admin) في القناة بصلاحية نشر الرسائل لكي يتمكن من إرسال الإثباتات."
 
-        await update.message.reply_text(
+        await safe_reply_text(
+            update.message,
             f"✅ **تم ضبط قناة إثباتات المبيعات بنجاح!**\n"
             f"القناة: `{clean_chan}`{title_info}\n\n"
             "اضغط الآن على **'🧪 إرسال منشور تجريبي للقناة'** من لوحة التحكم للتأكد من وصول الرسائل! 🚀",
@@ -1262,7 +1534,8 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="adm_cancel_pending_links")])
 
         keyboard = InlineKeyboardMarkup(buttons)
-        await update.message.reply_text(
+        await safe_reply_text(
+            update.message,
             f"📥 **تم اكتشاف `{len(link_candidates)}` رابط في رسالتك!**\n\n"
             "👇 **يرجى اختيار المنتج المراد حفظ هذه الروابط في مخزونه السحابي:**",
             reply_markup=keyboard,

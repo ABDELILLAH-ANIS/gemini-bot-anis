@@ -103,54 +103,66 @@ def main():
     else:
         logger.warning("JobQueue is not enabled; automatic supplier sync will not run in background.")
 
+    # 0. Admin inline callbacks (highest priority so admin buttons always work)
+    app.add_handler(CallbackQueryHandler(adm.admin_callback_dispatcher, pattern="^adm_"))
+
+    # Common inline callbacks for customer order flow
+    common_order_callbacks = [
+        CallbackQueryHandler(cust.category_selected_callback, pattern="^cat:"),
+        CallbackQueryHandler(cust.back_to_categories_callback, pattern="^back_to_categories$"),
+        CallbackQueryHandler(cust.back_to_products_callback, pattern="^back_to_prods:"),
+        CallbackQueryHandler(cust.product_selected_callback, pattern="^prod:"),
+        CallbackQueryHandler(cust.quantity_selected_callback, pattern="^qty:"),
+        CallbackQueryHandler(cust.payment_method_selected_callback, pattern="^paym:"),
+        CallbackQueryHandler(cust.proceed_to_upload_callback, pattern="^upload_receipt$"),
+        CallbackQueryHandler(cust.change_payment_method_callback, pattern="^change_payment_method$"),
+        CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
+    ]
+
     # 1. Customer Order Conversation
     order_conv_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex(r"شراء اشتراك"), cust.buy_subscription_entry),
             CommandHandler("buy", cust.buy_subscription_entry),
+            *common_order_callbacks,
         ],
         states={
-            cust.SELECTING_PRODUCT: [
-                CallbackQueryHandler(cust.category_selected_callback, pattern="^cat:"),
-                CallbackQueryHandler(cust.back_to_categories_callback, pattern="^back_to_categories$"),
-                CallbackQueryHandler(cust.product_selected_callback, pattern="^prod:"),
-                CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
-            ],
-            cust.SELECTING_QUANTITY: [
-                CallbackQueryHandler(cust.quantity_selected_callback, pattern="^qty:"),
-                CallbackQueryHandler(cust.back_to_products_callback, pattern="^back_to_prods:"),
-                CallbackQueryHandler(cust.back_to_categories_callback, pattern="^back_to_categories$"),
-                CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
-            ],
-            cust.SELECTING_PAYMENT: [
-                CallbackQueryHandler(cust.payment_method_selected_callback, pattern="^paym:"),
-                CallbackQueryHandler(cust.product_selected_callback, pattern="^prod:"),
-                CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
-            ],
+            cust.SELECTING_PRODUCT: [*common_order_callbacks],
+            cust.SELECTING_QUANTITY: [*common_order_callbacks],
+            cust.SELECTING_PAYMENT: [*common_order_callbacks],
             cust.AWAITING_RECEIPT: [
-                CallbackQueryHandler(cust.proceed_to_upload_callback, pattern="^upload_receipt$"),
-                CallbackQueryHandler(cust.change_payment_method_callback, pattern="^change_payment_method$"),
-                CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
+                *common_order_callbacks,
                 MessageHandler(filters.PHOTO, cust.receipt_photo_received),
                 MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
             ],
             cust.AWAITING_TRANSFER_NO: [
+                *common_order_callbacks,
                 MessageHandler(
-                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(r"إلغاء"),
+                    filters.TEXT
+                    & ~filters.COMMAND
+                    & ~filters.Regex(r"(إلغاء|شراء اشتراك|طلباتي|الدعم|التعليمات|لوحة تحكم الإدارة)"),
                     cust.transfer_number_received,
                 ),
                 MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
             ],
         },
         fallbacks=[
+            CommandHandler("start", cust.start_command),
+            CommandHandler("help", cust.help_command),
+            CommandHandler("my_orders", cust.my_orders_command),
+            CommandHandler("admin", adm.admin_panel_command),
             CommandHandler("cancel", cust.cancel_order),
             CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
             MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
+            MessageHandler(filters.Regex(r"شراء اشتراك"), cust.buy_subscription_entry),
+            MessageHandler(filters.Regex(r"طلباتي"), cust.my_orders_command),
+            MessageHandler(filters.Regex(r"الدعم|التعليمات"), cust.help_command),
+            MessageHandler(filters.Regex(r"لوحة تحكم الإدارة"), adm.admin_panel_command),
         ],
         allow_reentry=True,
     )
 
-    # Register Order Conversation first
+    # Register Order Conversation
     app.add_handler(order_conv_handler)
 
     # 2. General Customer Commands
@@ -163,7 +175,6 @@ def main():
     # 3. Admin Panel and Management
     app.add_handler(CommandHandler("admin", adm.admin_panel_command))
     app.add_handler(MessageHandler(filters.Regex(r"لوحة تحكم الإدارة"), adm.admin_panel_command))
-    app.add_handler(CallbackQueryHandler(adm.admin_callback_dispatcher, pattern="^adm_"))
     
     # Admin text handler (for manual links, reject reasons, stock additions, payment edits, custom messaging)
     app.add_handler(
