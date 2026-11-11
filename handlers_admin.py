@@ -24,6 +24,31 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
 
+def has_active_admin_prompt(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check if the admin currently has an active text-input prompt in bot_data"""
+    if user_id not in ADMIN_IDS:
+        return False
+    for key_prefix in (
+        "admin_manual_order_",
+        "admin_reject_order_",
+        "admin_add_stock_",
+        "admin_edit_pay_",
+        "admin_set_price_",
+        "admin_set_price_usd_",
+        "admin_set_inst_",
+        "admin_add_prod_step_",
+        "admin_set_proof_chan_",
+        "admin_custom_msg_",
+        "admin_reply_user_",
+        "admin_edit_topup_",
+        "admin_reject_topup_",
+        "admin_manual_wallet_step_",
+    ):
+        if context.bot_data.get(f"{key_prefix}{user_id}") is not None:
+            return True
+    return False
+
+
 def escape_md(val) -> str:
     """Safely escape legacy Telegram Markdown v1 special characters in dynamic strings"""
     if val is None:
@@ -185,8 +210,10 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
     if data == "adm_products_manage":
         await safe_answer(query)
         text = (
-            "🏷️ **إدارة المنتجات والأسعار:**\n─────────────────────\n"
-            "من هنا يمكنك تعديل أسعار المنتجات الحالية، إضافة منتجات جديدة، أو إيقاف/تفعيل أي منتج."
+            "🏷️ **إدارة المنتجات والأسعار والتعليمات:**\n─────────────────────\n"
+            "• تعديل السعر بالدينار الجزائري (`دج`) وبالدولار (`$`).\n"
+            "• التحكم بتعليمات وشروط كل منتج التي تظهر للعميل.\n"
+            "• إضافة منتج جديد أو إيقاف/تفعيل أي منتج."
         )
         await safe_edit_text(
             query.message,
@@ -196,21 +223,68 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
-    # Select product to edit price
-    if data == "adm_edit_price_select":
+    # Select product to edit price (supports pagination adm_edit_price_select or adm_edit_price_select:page)
+    if data == "adm_edit_price_select" or data.startswith("adm_edit_price_select:"):
         await safe_answer(query)
+        parts = data.split(":")
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
         prods = await database.get_all_products(only_active=False)
-        text = "✏️ **اختر المنتج الذي تريد تعديل سعره:**"
+        text = "✏️ **اختر المنتج لتعديل سعره (بالدينار أو الدولار) أو تعليماته:**"
         await safe_edit_text(
             query.message,
             text,
-            reply_markup=keyboards.get_admin_select_product_for_price_edit(prods),
+            reply_markup=keyboards.get_admin_select_product_for_price_edit(prods, page=page),
             parse_mode="Markdown",
         )
         return
 
-    # Awaiting new price for a specific product (supports both adm_set_price_for: and adm_edit_price:)
+    # Select product to edit instructions (paginated)
+    if data == "adm_edit_inst_select" or data.startswith("adm_edit_inst_select:"):
+        await safe_answer(query)
+        parts = data.split(":")
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        prods = await database.get_all_products(only_active=False)
+        text = "🔵 📖 **اختر المنتج الذي تريد تعديل تعليماته وشروطه للزبون:**"
+        await safe_edit_text(
+            query.message,
+            text,
+            reply_markup=keyboards.get_admin_select_product_for_inst_edit(prods, page=page),
+            parse_mode="Markdown",
+        )
+        return
+
+    # Product selected for price/instructions management
     if data.startswith("adm_set_price_for:") or data.startswith("adm_edit_price:"):
+        await safe_answer(query)
+        pid = data.split(":", 1)[1]
+        prod = await database.get_product_by_id(pid)
+        if not prod:
+            await safe_edit_text(query.message, "⚠️ المنتج غير موجود.")
+            return
+
+        p_usd = prod.get("price_usd", 2.5)
+        inst = (prod.get("instructions") or prod.get("description") or "غير محدد")[:250]
+        text = (
+            f"⚙️ **إدارة سعر وتعليمات المنتج:**\n"
+            f"─────────────────────\n"
+            f"📦 **المنتج:** {escape_md(prod['name'])}\n"
+            f"🇩🇿 **السعر الحالي بالدينار:** `{prod['price']}` {CURRENCY}\n"
+            f"💵 **السعر الحالي بالدولار:** `${p_usd}`\n"
+            f"📖 **التعليمات الحالية:**\n{escape_md(inst)}\n"
+            f"─────────────────────\n"
+            "👇 اختر ما تريد تعديله لهذا المنتج:"
+        )
+        kb = InlineKeyboardMarkup([
+            [keyboards._btn(f"🇩🇿 تعديل السعر بالدينار ({prod['price']} {CURRENCY})", callback_data=f"adm_price_dzd:{pid}", style="success")],
+            [keyboards._btn(f"💵 تعديل السعر بالدولار (${p_usd})", callback_data=f"adm_price_usd:{pid}", style="primary")],
+            [keyboards._btn("🔵 📖 تعديل تعليمات وشروط المنتج", callback_data=f"adm_inst_for:{pid}", style="primary")],
+            [keyboards._btn("🔙 رجوع لقائمة المنتجات", callback_data="adm_edit_price_select:0")],
+        ])
+        await safe_edit_text(query.message, text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    # Prompt for new DZD price
+    if data.startswith("adm_price_dzd:"):
         await safe_answer(query)
         pid = data.split(":", 1)[1]
         prod = await database.get_product_by_id(pid)
@@ -220,31 +294,79 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
         context.bot_data[f"admin_set_price_{user_id}"] = pid
         text = (
-            f"✏️ **تعديل سعر:** {escape_md(prod['name'])}\n"
-            f"💵 **السعر الحالي:** {prod['price']} {CURRENCY}\n\n"
+            f"🇩🇿 **تعديل السعر بالدينار للمنتج:** {escape_md(prod['name'])}\n"
+            f"💵 **السعر الحالي:** `{prod['price']}` {CURRENCY}\n\n"
             "✍️ **أرسل الآن السعر الجديد بالدينار (أرقام فقط):**\n"
-            "مثال: `1200`\n\n"
+            "مثال: `1200` أو `6000`\n\n"
             "لإلغاء العملية أرسل: `/cancel_action`"
         )
         await safe_edit_text(query.message, text, parse_mode="Markdown")
         return
 
-    # Toggle product visibility (active / inactive)
-    if data == "adm_toggle_product_select":
+    # Prompt for new USD price
+    if data.startswith("adm_price_usd:"):
         await safe_answer(query)
+        pid = data.split(":", 1)[1]
+        prod = await database.get_product_by_id(pid)
+        if not prod:
+            await safe_edit_text(query.message, "⚠️ المنتج غير موجود.")
+            return
+
+        context.bot_data[f"admin_set_price_usd_{user_id}"] = pid
+        p_usd = prod.get("price_usd", 2.5)
+        text = (
+            f"💵 **تعديل السعر بالدولار ($) للمنتج:** {escape_md(prod['name'])}\n"
+            f"💲 **السعر الحالي بالدولار:** `${p_usd}`\n\n"
+            "✍️ **أرسل الآن السعر الجديد بالدولار (أرقام فقط):**\n"
+            "مثال: `2.5` أو `15`\n\n"
+            "لإلغاء العملية أرسل: `/cancel_action`"
+        )
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
+        return
+
+    # Prompt for editing Product Instructions
+    if data.startswith("adm_inst_for:"):
+        await safe_answer(query)
+        pid = data.split(":", 1)[1]
+        prod = await database.get_product_by_id(pid)
+        if not prod:
+            await safe_edit_text(query.message, "⚠️ المنتج غير موجود.")
+            return
+
+        context.bot_data[f"admin_set_inst_{user_id}"] = pid
+        curr_inst = prod.get("instructions") or prod.get("description") or "لا توجد تعليمات مخصصة بعد."
+        text = (
+            f"🔵 📖 **تعديل تعليمات وشروط المنتج:** {escape_md(prod['name'])}\n"
+            f"─────────────────────\n"
+            f"📋 **التعليمات الحالية:**\n{escape_md(curr_inst)}\n"
+            f"─────────────────────\n\n"
+            "✍️ **أرسل الآن النص الجديد لتعليمات وشروط هذا المنتج:**\n"
+            "(سيظهر هذا النص للزبون عند الضغط على الزر الأزرق `📖 تعليمات وشروط المنتج` وكذلك عند تسليم الطلب).\n\n"
+            "لإلغاء العملية أرسل: `/cancel_action`"
+        )
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
+        return
+
+    # Toggle product visibility (active / inactive) with pagination
+    if data == "adm_toggle_product_select" or data.startswith("adm_toggle_product_select:"):
+        await safe_answer(query)
+        parts = data.split(":")
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
         prods = await database.get_all_products(only_active=False)
         text = "👁️ **اضغط على أي منتج لإيقافه أو تفعيله:**"
         await safe_edit_text(
             query.message,
             text,
-            reply_markup=keyboards.get_admin_select_product_for_toggle(prods),
+            reply_markup=keyboards.get_admin_select_product_for_toggle(prods, page=page),
             parse_mode="Markdown",
         )
         return
 
-    # Perform Toggle for product (supports both adm_toggle_for: and adm_toggle_prod:)
+    # Perform Toggle for product (supports adm_toggle_for:pid:page and adm_toggle_prod:pid)
     if data.startswith("adm_toggle_for:") or data.startswith("adm_toggle_prod:"):
-        pid = data.split(":", 1)[1]
+        parts = data.split(":")
+        pid = parts[1]
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
         is_now_active = await database.toggle_product_active(pid)
         status_label = "🟢 مفعّل" if is_now_active else "🔴 متوقف"
         await safe_answer(query, f"تم تغيير حالة المنتج إلى: {status_label}", show_alert=False)
@@ -252,7 +374,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             prods = await database.get_all_products(only_active=False)
             try:
                 await query.message.edit_reply_markup(
-                    reply_markup=keyboards.get_admin_select_product_for_toggle(prods)
+                    reply_markup=keyboards.get_admin_select_product_for_toggle(prods, page=page)
                 )
             except Exception:
                 pass
@@ -280,8 +402,9 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         for pid, prod in prods.items():
             cnt = counts.get(pid, 0)
             status_dot = "🟢" if cnt > 5 else ("🟡" if cnt > 0 else "🔴")
-            text += f"{status_dot} **{escape_md(prod['name'])}:** `{cnt}` رابط ({prod['price']} {CURRENCY})\n"
-        text += "\n💡 لإضافة روابط جديدة، اضغط على زر '➕ إضافة روابط للمخزن'."
+            p_usd = prod.get("price_usd", 2.5)
+            text += f"{status_dot} **{escape_md(prod['name'])}:** `{cnt}` رابط ({prod['price']} {CURRENCY} | ${p_usd})\n"
+        text += "\n💡 لإضافة روابط اضغط '➕ إضافة روابط للمخزن'، ولحذف روابط اضغط '🗑️ حذف روابط من المخزن'."
         await safe_edit_text(
             query.message,
             text,
@@ -290,17 +413,326 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
-    # Select product to add links
-    if data == "adm_add_links":
+    # Select product to add links (paginated)
+    if data == "adm_add_links" or data.startswith("adm_add_links_page:"):
         await safe_answer(query)
+        parts = data.split(":")
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
         prods = await database.get_all_products(only_active=True)
         text = "➕ **إضافة روابط للمخزن:**\nيرجى اختيار الباقة التي تريد تزويد روابطها:"
         await safe_edit_text(
             query.message,
             text,
-            reply_markup=keyboards.get_admin_select_product_for_stock(prods),
+            reply_markup=keyboards.get_admin_select_product_for_stock(prods, page=page),
             parse_mode="Markdown",
         )
+        return
+
+    # Delete Stock Links Menu (paginated)
+    if data == "adm_del_links_menu" or data.startswith("adm_del_links_menu:"):
+        await safe_answer(query)
+        parts = data.split(":")
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        prods = await database.get_all_products(only_active=False)
+        counts = await database.get_stock_counts()
+        text = (
+            "🗑️ **حذف روابط من المخزون:**\n"
+            "─────────────────────\n"
+            "اختر المنتج لعرض الروابط المتوفرة بداخله وحذف رابط معين أو تفريغ مخزونه:"
+        )
+        await safe_edit_text(
+            query.message,
+            text,
+            reply_markup=keyboards.get_admin_select_product_for_del_stock(prods, counts, page=page),
+            parse_mode="Markdown",
+        )
+        return
+
+    # View unused links for a specific product & delete buttons
+    if data.startswith("adm_del_stock_prod:"):
+        await safe_answer(query)
+        pid = data.split(":", 1)[1]
+        prod = await database.get_product_by_id(pid)
+        prod_name = prod["name"] if prod else pid
+        links = await database.get_unused_links_for_product(pid, limit=25)
+
+        if not links:
+            text = (
+                f"📦 **مخزون المنتج:** {escape_md(prod_name)}\n\n"
+                "⚪ لا توجد أي روابط متوفرة في المخزون المحلي لهذا المنتج حالياً."
+            )
+            kb = InlineKeyboardMarkup([
+                [keyboards._btn("➕ إضافة روابط لهذا المنتج", callback_data=f"adm_stock_for:{pid}", style="success")],
+                [keyboards._btn("🔙 رجوع لقائمة المخزون", callback_data="adm_del_links_menu:0")],
+            ])
+            await safe_edit_text(query.message, text, reply_markup=kb, parse_mode="Markdown")
+            return
+
+        text = (
+            f"🗑️ **إدارة وحذف روابط المخزون:**\n"
+            f"📦 **المنتج:** {escape_md(prod_name)}\n"
+            f"🔢 **الروابط المتاحة حالياً:** `{len(links)}` رابط\n"
+            f"─────────────────────\n"
+        )
+        buttons = []
+        for idx, l in enumerate(links[:15], 1):
+            lid = l["id"]
+            url_str = str(l.get("link_url", ""))
+            short_url = url_str if len(url_str) <= 38 else url_str[:35] + "..."
+            text += f"`#{idx}` — `{escape_md(url_str[:65])}`\n"
+            buttons.append([
+                keyboards._btn(f"🗑️ حذف #{idx}: {short_url}", callback_data=f"adm_del_one_link:{lid}:{pid}", style="danger")
+            ])
+
+        buttons.append([
+            keyboards._btn(f"⚠️ حذف جميع الروابط ({len(links)}) لهذا المنتج", callback_data=f"adm_clear_all_links:{pid}", style="danger")
+        ])
+        buttons.append([keyboards._btn("🔙 رجوع لقائمة المنتجات", callback_data="adm_del_links_menu:0")])
+        await safe_edit_text(query.message, text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        return
+
+    # Delete a single stock link
+    if data.startswith("adm_del_one_link:"):
+        parts = data.split(":", 2)
+        link_id = int(parts[1])
+        pid = parts[2]
+        await database.delete_stock_link(link_id, pid)
+        await safe_answer(query, "🗑️ تم حذف الرابط من المخزون السحابي والمحلي!", show_alert=False)
+        # Refresh view
+        query.data = f"adm_del_stock_prod:{pid}"
+        return await admin_callback_dispatcher(update, context)
+
+    # Clear all unused stock links for a product
+    if data.startswith("adm_clear_all_links:"):
+        pid = data.split(":", 1)[1]
+        deleted_cnt = await database.clear_product_stock(pid)
+        await safe_answer(query, f"🗑️ تم مسح جميع الروابط ({deleted_cnt}) بنجاح!", show_alert=True)
+        query.data = f"adm_del_stock_prod:{pid}"
+        return await admin_callback_dispatcher(update, context)
+
+    # ==================== إدارة المحافظ وطلبات شحن الرصيد (Admin Wallets & Top-Ups) ====================
+
+    if data == "adm_wallets_menu":
+        await safe_answer(query)
+        pending_topups = await database.get_pending_topups(limit=50)
+        all_wallets = await database.get_all_wallets(limit=100)
+        total_dzd = sum(float(w.get("balance_dzd", 0)) for w in all_wallets)
+        total_usd = sum(float(w.get("balance_usd", 0)) for w in all_wallets)
+
+        text = (
+            "👛 **إدارة محافظ العملاء وطلبات الشحن (Top Up Wallet):**\n"
+            "─────────────────────\n"
+            f"⏳ **طلبات الشحن المعلقة بانتظار موافقتك:** `{len(pending_topups)}` طلب\n"
+            f"👥 **عدد المحافظ المسجلة:** `{len(all_wallets)}` محفظة\n"
+            f"🇩🇿 **إجمالي أرصدة العملاء بالدينار:** `{total_dzd}` {CURRENCY}\n"
+            f"💵 **إجمالي أرصدة العملاء بالدولار:** `${total_usd:.2f}`\n"
+            "─────────────────────\n"
+            "اختر الإجراء المطلوب بالأسفل:"
+        )
+        kb = InlineKeyboardMarkup([
+            [keyboards._btn(f"⏳ طلبات شحن المحفظة المعلقة ({len(pending_topups)})", callback_data="adm_pending_topups", style="primary")],
+            [keyboards._btn("👥 عرض أرصدة محافظ العملاء", callback_data="adm_list_wallets")],
+            [keyboards._btn("➕ شحن / تعديل رصيد عميل يدوياً", callback_data="adm_manual_wallet_credit", style="success")],
+            [keyboards._btn("🔙 رجوع للوحة التحكم", callback_data="adm_dashboard")],
+        ])
+        await safe_edit_text(query.message, text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    # View Pending Wallet Top-Ups
+    if data == "adm_pending_topups":
+        await safe_answer(query, "⏳ جاري تحميل طلبات شحن المحفظة...")
+        pending = await database.get_pending_topups(limit=20)
+        if not pending:
+            text = "⏳ **طلبات شحن المحفظة المعلقة:**\n\n🎉 لا توجد أي طلبات شحن معلقة حالياً!"
+            kb = InlineKeyboardMarkup([
+                [keyboards._btn("👛 رجوع لإدارة المحافظ", callback_data="adm_wallets_menu")],
+                [keyboards._btn("🔙 لوحة التحكم", callback_data="adm_dashboard")],
+            ])
+            await safe_edit_text(query.message, text, reply_markup=kb, parse_mode="Markdown")
+            return
+
+        text = f"⏳ **طلبات شحن المحفظة بانتظار التأكيد ({len(pending)}):**\n─────────────────────\n"
+        buttons = []
+        for t in pending:
+            tid = t["id"]
+            tcode = t.get("topup_code") or f"TOP-{tid:04d}"
+            uname = escape_md(t.get("user_name") or "عميل")
+            uuser = escape_md(t.get("user_username") or "")
+            amt = t.get("amount", 0)
+            curr = escape_md(t.get("currency", CURRENCY))
+            pm = escape_md(t.get("payment_method", "بريدي موب"))
+            tnum = escape_md(t.get("transfer_number", ""))
+            text += (
+                f"🔹 **`{tcode}`** | 👤 {uname} ({uuser}) | ID: `{t.get('user_id')}`\n"
+                f"• المبلغ: **`{amt}` {curr}** عبر {pm}\n"
+                f"• التأكيد/المرجع: `{tnum}`\n"
+                f"───────────────\n"
+            )
+            buttons.append([
+                keyboards._btn(f"✅ موافقة {tcode} ({amt} {t.get('currency')})", callback_data=f"adm_topup_appr:{tid}", style="success"),
+                keyboards._btn(f"⚙️ تفاصيل {tcode}", callback_data=f"adm_topup_view:{tid}", style="primary"),
+            ])
+        buttons.append([keyboards._btn("🔙 رجوع لإدارة المحافظ", callback_data="adm_wallets_menu")])
+        await safe_edit_text(query.message, text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        return
+
+    # View single Top-Up details
+    if data.startswith("adm_topup_view:"):
+        await safe_answer(query)
+        tid = int(data.split(":", 1)[1])
+        topup = await database.get_topup_by_id(tid)
+        if not topup:
+            await safe_edit_text(query.message, "⚠️ طلب الشحن غير موجود.")
+            return
+        wallet = await database.get_user_wallet(topup["user_id"])
+        text = (
+            f"👛 **تفاصيل طلب شحن المحفظة `{topup.get('topup_code')}`:**\n"
+            f"─────────────────────\n"
+            f"👤 **العميل:** {escape_md(topup.get('user_name'))} ({escape_md(topup.get('user_username'))})\n"
+            f"🆔 **ID:** `{topup.get('user_id')}`\n"
+            f"💰 **المبلغ المطلوب:** `{topup.get('amount')}` {escape_md(topup.get('currency'))}\n"
+            f"💳 **وسيلة الدفع:** {escape_md(topup.get('payment_method'))}\n"
+            f"🧾 **التأكيد / المرجع:** `{escape_md(topup.get('transfer_number'))}`\n"
+            f"📊 **الحالة:** `{topup.get('status')}`\n"
+            f"👛 **رصيد العميل الحالي:** `{wallet.get('balance_dzd', 0)}` {CURRENCY} | `${wallet.get('balance_usd', 0):.2f}`"
+        )
+        await safe_edit_text(
+            query.message,
+            text,
+            reply_markup=keyboards.get_admin_topup_keyboard(tid, topup["user_id"]),
+            parse_mode="Markdown",
+        )
+        return
+
+    # Approve Wallet Top-Up directly
+    if data.startswith("adm_topup_appr:"):
+        tid = int(data.split(":", 1)[1])
+        ok, topup, new_wallet = await database.approve_wallet_topup(tid)
+        if not ok or not topup:
+            await safe_answer(query, "⚠️ تمت معالجة هذا الطلب مسبقاً أو أنه غير موجود.", show_alert=True)
+            return
+
+        await safe_answer(query, "✅ تمت الموافقة وإضافة الرصيد لمحفظة العميل!", show_alert=True)
+        tcode = topup.get("topup_code") or f"TOP-{tid:04d}"
+        amt = topup.get("amount", 0)
+        curr = topup.get("currency", CURRENCY)
+        cust_id = topup["user_id"]
+
+        # Notify Customer
+        cust_msg = (
+            f"🎉 **تمت الموافقة على شحن محفظتك بنجاح!**\n"
+            f"─────────────────────\n"
+            f"🔹 **رقم العملية:** `{tcode}`\n"
+            f"➕ **المبلغ المضاف:** `{amt}` {escape_md(curr)}\n\n"
+            f"👛 **رصيد محفظتك الحالي الآن:**\n"
+            f"• 🇩🇿 بالدينار: **`{new_wallet['balance_dzd']}` {CURRENCY}**\n"
+            f"• 💵 بالدولار: **`${new_wallet['balance_usd']:.2f}`**\n"
+            f"─────────────────────\n"
+            "يمكنك الآن شراء أي اشتراك فوراً باستخدام رصيد محفظتك! 🚀"
+        )
+        await safe_send_message(context.bot, cust_id, cust_msg, parse_mode="Markdown")
+
+        admin_done = (
+            f"✅ **تمت الموافقة على طلب الشحن `{tcode}` وإضافة الرصيد!**\n"
+            f"👤 العميل: {escape_md(topup.get('user_name'))} (`{cust_id}`)\n"
+            f"➕ المبلغ المضاف: `{amt}` {escape_md(curr)}\n"
+            f"👛 رصيد العميل الجديد: `{new_wallet['balance_dzd']}` {CURRENCY} | `${new_wallet['balance_usd']:.2f}`"
+        )
+        if getattr(query.message, "photo", None):
+            try:
+                await query.message.edit_caption(caption=admin_done, parse_mode="Markdown", reply_markup=None)
+            except Exception:
+                await safe_reply_text(query.message, admin_done, parse_mode="Markdown")
+        else:
+            await safe_edit_text(query.message, admin_done, reply_markup=None, parse_mode="Markdown")
+        return
+
+    # Approve Wallet Top-Up with edited amount
+    if data.startswith("adm_topup_edit:"):
+        await safe_answer(query)
+        tid = int(data.split(":", 1)[1])
+        topup = await database.get_topup_by_id(tid)
+        if not topup or topup.get("status") != "PENDING":
+            await safe_reply_text(query.message, "⚠️ هذا الطلب تمت معالجته مسبقاً أو غير موجود.")
+            return
+        context.bot_data[f"admin_edit_topup_{user_id}"] = tid
+        await safe_reply_text(
+            query.message,
+            f"✏️ **تعديل مبلغ الشحن والموافقة على `{topup.get('topup_code')}`:**\n"
+            f"المبلغ الذي أدخله العميل: `{topup.get('amount')}` {escape_md(topup.get('currency'))}\n\n"
+            "✍️ **أرسل الآن المبلغ الفعلي الذي وصلت قيمته لإضافته لمحفظة العميل (أرقام فقط):**\n"
+            "لإلغاء العملية أرسل: `/cancel_action`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Reject Wallet Top-Up
+    if data.startswith("adm_topup_rej:"):
+        await safe_answer(query)
+        tid = int(data.split(":", 1)[1])
+        topup = await database.get_topup_by_id(tid)
+        if not topup or topup.get("status") != "PENDING":
+            await safe_reply_text(query.message, "⚠️ هذا الطلب تمت معالجته مسبقاً أو غير موجود.")
+            return
+        context.bot_data[f"admin_reject_topup_{user_id}"] = tid
+        await safe_reply_text(
+            query.message,
+            f"❌ **رفض طلب شحن المحفظة `{topup.get('topup_code')}`:**\n\n"
+            "✍️ أرسل سبب الرفض ليتم إرساله للعميل (أو أرسل `/skip_reason` للرفض المباشر):\n"
+            "لإلغاء العملية أرسل: `/cancel_action`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # View Top-Up Receipt Photo
+    if data.startswith("adm_topup_receipt:"):
+        tid = int(data.split(":", 1)[1])
+        topup = await database.get_topup_by_id(tid)
+        if not topup or not topup.get("receipt_file_id"):
+            await safe_answer(query, "⚠️ لا توجد صورة وصل مرفقة بهذا الطلب (العميل أرسل تأكيداً نصياً).", show_alert=True)
+            return
+        await safe_answer(query, "🖼️ جاري عرض صورة الوصل...")
+        await context.bot.send_photo(
+            chat_id=user_id,
+            photo=topup["receipt_file_id"],
+            caption=f"🖼️ وصل شحن المحفظة `{topup.get('topup_code')}` — العميل `{topup.get('user_id')}`",
+            reply_markup=keyboards.get_admin_topup_keyboard(tid, topup["user_id"]),
+        )
+        return
+
+    # List customer wallets
+    if data == "adm_list_wallets":
+        await safe_answer(query)
+        wallets = await database.get_all_wallets(limit=30)
+        if not wallets:
+            text = "👥 **أرصدة محافظ العملاء:**\n\nلا توجد محافظ مسجلة حتى الآن."
+        else:
+            text = f"👥 **أرصدة محافظ العملاء (أعلى `{len(wallets)}` محفظة):**\n─────────────────────\n"
+            for w in wallets:
+                uname = escape_md(w.get("user_name") or "عميل")
+                uuser = escape_md(w.get("user_username") or "")
+                text += (
+                    f"• 👤 **{uname}** ({uuser}) | ID: `{w['user_id']}`\n"
+                    f"  🇩🇿 `{w.get('balance_dzd', 0)}` {CURRENCY} | 💵 `${w.get('balance_usd', 0):.2f}`\n"
+                )
+        kb = InlineKeyboardMarkup([
+            [keyboards._btn("➕ شحن / تعديل رصيد عميل يدوياً", callback_data="adm_manual_wallet_credit", style="success")],
+            [keyboards._btn("🔙 رجوع لإدارة المحافظ", callback_data="adm_wallets_menu")],
+        ])
+        await safe_edit_text(query.message, text, reply_markup=kb, parse_mode="Markdown")
+        return
+
+    # Manual wallet credit wizard
+    if data == "adm_manual_wallet_credit":
+        await safe_answer(query)
+        context.bot_data[f"admin_manual_wallet_step_{user_id}"] = {"step": 1}
+        text = (
+            "➕ **شحن / تعديل رصيد محفظة عميل يدوياً (الخطوة 1 من 2):**\n\n"
+            "✍️ **أرسل الآن معرف العميل الرقمي (User ID):**\n"
+            "مثال: `5075624178`\n\n"
+            "لإلغاء العملية أرسل: `/cancel_action`"
+        )
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
         return
 
     # Selected product for stock
@@ -1132,8 +1564,12 @@ async def deliver_links_to_customer(
         clean_l = l.replace("`", "")
         items_formatted += f"{header}\n`{clean_l}`\n\n"
 
-    # Tailor instructions depending on whether it's Gemini or other digital products
-    if "gemini" in prod_id.lower() or "gemini" in product_name.lower():
+    # Tailor instructions: use custom product instructions from DB if configured, else default
+    prod_record = await database.get_product_by_id(prod_id) if prod_id else None
+    custom_inst = (prod_record.get("instructions") or "").strip() if prod_record else ""
+    if custom_inst:
+        instructions = f"📘 **تعليمات وشروط التفعيل:**\n{escape_md(custom_inst)}\n\n"
+    elif "gemini" in prod_id.lower() or "gemini" in product_name.lower():
         instructions = (
             "🌟 **طريقة التفعيل:**\n"
             "1. قم بفتح رابط التفعيل في المتصفح.\n"
@@ -1189,15 +1625,23 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
 
     # Cancel command check
     if text in ["/cancel_action", "الغاء", "إلغاء"]:
-        context.bot_data.pop(f"admin_manual_order_{user_id}", None)
-        context.bot_data.pop(f"admin_reject_order_{user_id}", None)
-        context.bot_data.pop(f"admin_add_stock_{user_id}", None)
-        context.bot_data.pop(f"admin_edit_pay_{user_id}", None)
-        context.bot_data.pop(f"admin_set_price_{user_id}", None)
-        context.bot_data.pop(f"admin_add_prod_step_{user_id}", None)
-        context.bot_data.pop(f"admin_set_proof_chan_{user_id}", None)
-        context.bot_data.pop(f"admin_custom_msg_{user_id}", None)
-        context.bot_data.pop(f"admin_reply_user_{user_id}", None)
+        for key_prefix in (
+            "admin_manual_order_",
+            "admin_reject_order_",
+            "admin_add_stock_",
+            "admin_edit_pay_",
+            "admin_set_price_",
+            "admin_set_price_usd_",
+            "admin_set_inst_",
+            "admin_add_prod_step_",
+            "admin_set_proof_chan_",
+            "admin_custom_msg_",
+            "admin_reply_user_",
+            "admin_edit_topup_",
+            "admin_reject_topup_",
+            "admin_manual_wallet_step_",
+        ):
+            context.bot_data.pop(f"{key_prefix}{user_id}", None)
         await update.message.reply_text("✅ تم إلغاء العملية الحالية.")
         return
 
@@ -1303,11 +1747,11 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             except Exception as e:
                 logger.warning(f"Failed to send direct reply to {target_uid}: {e}")
 
-    # 1. Awaiting new price for product
+    # 1. Awaiting new DZD price for product
     edit_price_pid = context.bot_data.get(f"admin_set_price_{user_id}")
     if edit_price_pid:
         try:
-            new_price = float(text.replace(",", "."))
+            new_price = float(text.replace(",", ".").replace("دج", "").strip())
             if new_price <= 0:
                 await update.message.reply_text("⚠️ يرجى إدخال سعر موجب.")
                 return
@@ -1316,13 +1760,180 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             context.bot_data.pop(f"admin_set_price_{user_id}", None)
             await safe_reply_text(
                 update.message,
-                f"✅ **تم تحديث السعر بنجاح!**\n"
-                f"المنتج: **{escape_md(prod['name'] if prod else edit_price_pid)}** أصبح بسعر `{new_price}` {CURRENCY}.",
+                f"✅ **تم تحديث السعر بالدينار بنجاح!**\n"
+                f"📦 المنتج: **{escape_md(prod['name'] if prod else edit_price_pid)}**\n"
+                f"🇩🇿 السعر الجديد: `{new_price}` {CURRENCY}\n"
+                f"💵 السعر بالدولار: `${prod.get('price_usd', 2.5) if prod else 2.5}`",
                 parse_mode="Markdown",
             )
             return
         except ValueError:
-            await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح للسعر (مثال: 1200).")
+            await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح للسعر بالدينار (مثال: 1200).")
+            return
+
+    # 1.1 Awaiting new USD price ($) for product
+    edit_price_usd_pid = context.bot_data.get(f"admin_set_price_usd_{user_id}")
+    if edit_price_usd_pid:
+        try:
+            new_price_usd = round(float(text.replace(",", ".").replace("$", "").strip()), 2)
+            if new_price_usd <= 0:
+                await update.message.reply_text("⚠️ يرجى إدخال سعر موجب بالدولار.")
+                return
+            await database.update_product_price_usd(edit_price_usd_pid, new_price_usd)
+            prod = await database.get_product_by_id(edit_price_usd_pid)
+            context.bot_data.pop(f"admin_set_price_usd_{user_id}", None)
+            await safe_reply_text(
+                update.message,
+                f"✅ **تم تحديث السعر بالدولار بنجاح!**\n"
+                f"📦 المنتج: **{escape_md(prod['name'] if prod else edit_price_usd_pid)}**\n"
+                f"💵 السعر الجديد بالدولار: `${new_price_usd}`\n"
+                f"🇩🇿 السعر بالدينار: `{prod.get('price', 1000) if prod else 1000}` {CURRENCY}",
+                parse_mode="Markdown",
+            )
+            return
+        except ValueError:
+            await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح للسعر بالدولار (مثال: 2.5 أو 15).")
+            return
+
+    # 1.2 Awaiting new product instructions
+    edit_inst_pid = context.bot_data.get(f"admin_set_inst_{user_id}")
+    if edit_inst_pid:
+        await database.update_product_instructions(edit_inst_pid, text)
+        prod = await database.get_product_by_id(edit_inst_pid)
+        context.bot_data.pop(f"admin_set_inst_{user_id}", None)
+        await safe_reply_text(
+            update.message,
+            f"✅ **تم تحديث تعليمات وشروط المنتج بنجاح!**\n"
+            f"─────────────────────\n"
+            f"📦 **المنتج:** {escape_md(prod['name'] if prod else edit_inst_pid)}\n"
+            f"🔵 📖 **التعليمات الجديدة:**\n{escape_md(text)}\n"
+            f"─────────────────────\n"
+            "ستظهر هذه التعليمات للزبون عند الضغط على زر `📖 تعليمات وشروط المنتج` الأزرق وعند تسليم الطلب!",
+            parse_mode="Markdown",
+        )
+        return
+
+    # 1.3 Awaiting edited amount for Wallet Top-Up approval
+    edit_topup_id = context.bot_data.get(f"admin_edit_topup_{user_id}")
+    if edit_topup_id:
+        try:
+            custom_amt = float(text.replace(",", ".").replace("$", "").replace("دج", "").strip())
+            if custom_amt <= 0:
+                raise ValueError()
+        except ValueError:
+            await update.message.reply_text("⚠️ يرجى إدخال مبلغ رقمي صحيح أكبر من الصفر.")
+            return
+
+        ok, topup, new_wallet = await database.approve_wallet_topup(edit_topup_id, custom_amount=custom_amt)
+        context.bot_data.pop(f"admin_edit_topup_{user_id}", None)
+        if not ok or not topup:
+            await update.message.reply_text("⚠️ الطلب غير موجود أو تمت معالجته مسبقاً.")
+            return
+
+        tcode = topup.get("topup_code") or f"TOP-{edit_topup_id:04d}"
+        curr = topup.get("currency", CURRENCY)
+        cust_id = topup["user_id"]
+
+        cust_msg = (
+            f"🎉 **تمت الموافقة على شحن محفظتك بنجاح!**\n"
+            f"─────────────────────\n"
+            f"🔹 **رقم العملية:** `{tcode}`\n"
+            f"➕ **المبلغ المضاف:** `{custom_amt}` {escape_md(curr)}\n\n"
+            f"👛 **رصيد محفظتك الحالي الآن:**\n"
+            f"• 🇩🇿 بالدينار: **`{new_wallet['balance_dzd']}` {CURRENCY}**\n"
+            f"• 💵 بالدولار: **`${new_wallet['balance_usd']:.2f}`**\n"
+            f"─────────────────────\n"
+            "يمكنك الآن شراء أي اشتراك فوراً باستخدام رصيد محفظتك! 🚀"
+        )
+        await safe_send_message(context.bot, cust_id, cust_msg, parse_mode="Markdown")
+        await safe_reply_text(
+            update.message,
+            f"✅ **تمت الموافقة على `{tcode}` وإضافة `{custom_amt}` {escape_md(curr)} لمحفظة العميل (`{cust_id}`)!**\n"
+            f"👛 رصيد العميل الجديد: `{new_wallet['balance_dzd']}` {CURRENCY} | `${new_wallet['balance_usd']:.2f}`",
+            parse_mode="Markdown",
+        )
+        return
+
+    # 1.4 Awaiting rejection reason for Wallet Top-Up
+    reject_topup_id = context.bot_data.get(f"admin_reject_topup_{user_id}")
+    if reject_topup_id:
+        reason = text if text != "/skip_reason" else "لم يتم التمكن من التحقق من وصول الحوالة"
+        topup = await database.get_topup_by_id(reject_topup_id)
+        await database.reject_wallet_topup(reject_topup_id, reason)
+        context.bot_data.pop(f"admin_reject_topup_{user_id}", None)
+
+        if topup:
+            tcode = topup.get("topup_code") or f"TOP-{reject_topup_id:04d}"
+            cust_msg = (
+                f"❌ **نعتذر منك، تم رفض طلب شحن المحفظة `{tcode}`.**\n\n"
+                f"⚠️ **السبب:** {escape_md(reason)}\n\n"
+                "يرجى التأكد من إشعار التحويل أو التواصل معنا للمساعدة."
+            )
+            await safe_send_message(context.bot, topup["user_id"], cust_msg, parse_mode="Markdown")
+
+        await safe_reply_text(update.message, "✅ تم رفض طلب شحن المحفظة وإشعار العميل.", parse_mode="Markdown")
+        return
+
+    # 1.5 Manual Wallet Credit Wizard (by User ID)
+    manual_wallet_state = context.bot_data.get(f"admin_manual_wallet_step_{user_id}")
+    if manual_wallet_state:
+        step = manual_wallet_state.get("step", 1)
+        if step == 1:
+            if not text.isdigit():
+                await update.message.reply_text("⚠️ يرجى إرسال معرف العميل الرقمي (User ID) بالأرقام فقط.")
+                return
+            target_uid = int(text)
+            w = await database.get_user_wallet(target_uid)
+            manual_wallet_state["target_uid"] = target_uid
+            manual_wallet_state["step"] = 2
+            context.bot_data[f"admin_manual_wallet_step_{user_id}"] = manual_wallet_state
+            await safe_reply_text(
+                update.message,
+                f"👛 **محفظة العميل (`{target_uid}`):**\n"
+                f"• الرصيد الحالي بالدينار: `{w.get('balance_dzd', 0)}` {CURRENCY}\n"
+                f"• الرصيد الحالي بالدولار: `${w.get('balance_usd', 0):.2f}`\n\n"
+                "✍️ **الآن أرسل المبلغ المراد إضافته مع العملة:**\n"
+                "• لإضافة دينار أرسل الرقم فقط (مثال: `2000`)\n"
+                "• لإضافة دولار أضف علامة `$` (مثال: `10$`)\n"
+                "• لخصم رصيد ضع علامة سالب `-` (مثال: `-500` أو `-5$`)",
+                parse_mode="Markdown",
+            )
+            return
+        elif step == 2:
+            target_uid = manual_wallet_state["target_uid"]
+            is_usd = "$" in text or "usd" in text.lower() or "دولار" in text
+            clean_num = text.replace("$", "").replace("usd", "").replace("USD", "").replace("دولار", "").replace("دج", "").replace(",", ".").strip()
+            try:
+                delta = float(clean_num)
+            except ValueError:
+                await update.message.reply_text("⚠️ صيغة غير صحيحة. أرسل مثلاً `2000` للدينار أو `10$` للدولار.")
+                return
+
+            new_w = await database.add_wallet_balance(
+                target_uid,
+                amount_dzd=0.0 if is_usd else delta,
+                amount_usd=delta if is_usd else 0.0,
+            )
+            context.bot_data.pop(f"admin_manual_wallet_step_{user_id}", None)
+            curr_str = "$" if is_usd else CURRENCY
+
+            if delta > 0:
+                await safe_send_message(
+                    context.bot,
+                    target_uid,
+                    f"🎉 **تمت إضافة رصيد إلى محفظتك من قِبل الإدارة!**\n\n"
+                    f"➕ **المبلغ المضاف:** `{delta}` {curr_str}\n"
+                    f"👛 **رصيد محفظتك الآن:** `{new_w['balance_dzd']}` {CURRENCY} | `${new_w['balance_usd']:.2f}`",
+                    parse_mode="Markdown",
+                )
+
+            await safe_reply_text(
+                update.message,
+                f"✅ **تم تعديل محفظة العميل (`{target_uid}`) بنجاح!**\n"
+                f"• الرصيد الجديد بالدينار: `{new_w['balance_dzd']}` {CURRENCY}\n"
+                f"• الرصيد الجديد بالدولار: `${new_w['balance_usd']:.2f}`",
+                parse_mode="Markdown",
+            )
             return
 
     # 2. Add product wizard

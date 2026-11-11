@@ -23,6 +23,8 @@ SELECTING_QUANTITY = 2
 SELECTING_PAYMENT = 3
 AWAITING_RECEIPT = 4
 AWAITING_TRANSFER_NO = 5
+AWAITING_TOPUP_AMOUNT = 6
+AWAITING_TOPUP_PROOF = 7
 
 
 def escape_md(val) -> str:
@@ -76,41 +78,70 @@ async def safe_reply_text(message, text: str, reply_markup=None, parse_mode: str
         return await message.reply_text(clean_text, reply_markup=reply_markup, parse_mode=None)
 
 
+async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Silent handler for pagination indicator button"""
+    if update.callback_query:
+        await safe_answer(update.callback_query)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for /start command"""
     context.user_data.pop("order_draft", None)
+    context.user_data.pop("topup_draft", None)
     user = update.effective_user
     products = await database.get_all_products(only_active=True)
+    wallet = await database.get_user_wallet(
+        user.id,
+        user_name=user.full_name or "",
+        user_username=f"@{user.username}" if user.username else "",
+    )
 
     products_list_text = ""
-    for p in list(products.values())[:12]:
-        products_list_text += f"• 💎 {escape_md(p['name'])} — `{p['price']}` {CURRENCY}\n"
-    if len(products) > 12:
-        products_list_text += f"• 🛍️ _و `{len(products) - 12}` باقات ومنتجات أخرى داخل القائمة..._\n"
+    for p in list(products.values())[:8]:
+        p_usd = p.get("price_usd", 2.5)
+        products_list_text += f"• 💎 {escape_md(p['name'])} — `{p['price']}` {CURRENCY} (`${p_usd}`)\n"
+    if len(products) > 8:
+        products_list_text += f"• 🛍️ _و `{len(products) - 8}` باقات ومنتجات أخرى داخل القائمة..._\n"
+
+    bal_dzd = wallet.get("balance_dzd", 0.0)
+    bal_usd = wallet.get("balance_usd", 0.0)
+    dzd_str = f"{int(bal_dzd)}" if float(bal_dzd).is_integer() else f"{bal_dzd:.2f}"
+    usd_str = f"{bal_usd:.2f}"
 
     welcome_text = (
         f"مرحباً بك يا **{escape_md(user.first_name)}** في **متجر الاشتراكات الرقمية** 🤖✨\n\n"
         "نوفر لك اشتراكات رسمية بأفضل الأسعار وبضمان كامل.\n\n"
+        f"👛 **رصيد محفظتك الحالي:** `{dzd_str}` {CURRENCY} | `${usd_str}`\n\n"
         f"📌 **أبرز الباقات المتوفرة حالياً:**\n{products_list_text}\n"
         "اختر من القائمة بالأسفل للبدء 👇"
     )
-    await safe_reply_text(
-        update.message,
-        welcome_text,
-        reply_markup=keyboards.get_main_menu(user.id),
-        parse_mode="Markdown",
-    )
+    if update.callback_query:
+        await safe_answer(update.callback_query)
+        await safe_edit_text(
+            update.callback_query.message,
+            welcome_text,
+            reply_markup=keyboards.get_categories_keyboard(),
+            parse_mode="Markdown",
+        )
+    else:
+        await safe_reply_text(
+            update.message,
+            welcome_text,
+            reply_markup=keyboards.get_main_menu(user.id),
+            parse_mode="Markdown",
+        )
     return ConversationHandler.END
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for Support & Info button"""
     context.user_data.pop("order_draft", None)
+    context.user_data.pop("topup_draft", None)
     text = (
-        "ℹ️ **حول الخدمة وطريقة التفعيل:**\n\n"
-        "1. بعد إتمام الدفع وتأكيد الحوالة، ستستلم رابط أو بيانات التفعيل المخصصة لحسابك.\n"
-        "2. كل ما عليك هو فتح الرابط وتسجيل الدخول بحسابك ليتم تفعيل الاشتراك مباشرة.\n"
-        "3. الاشتراكات أصلية ومضمونة طوال فترة الاشتراك.\n\n"
+        "📘 **حول الخدمة وطريقة الشراء والتفعيل:**\n\n"
+        "1. يمكنك شحن محفظتك بالدينار أو الدولار عبر زر **'👛 محفظتي (Top Up)'** والشراء الفوري بضغطة زر.\n"
+        "2. أو يمكنك اختيار المنتج والدفع المباشر وإرسال وصل التحويل.\n"
+        "3. لكل منتج زر أزرق **'📖 تعليمات وشروط المنتج'** يوضح طريقة التفعيل والضمان بالتفصيل.\n\n"
         "📞 في حال واجهت أي مشكلة، يمكنك إرسال رسالتك هنا مباشرة وسيقوم فريق الدعم بالرد عليك فوراً."
     )
     await safe_reply_text(
@@ -125,6 +156,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def my_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View previous orders of the user"""
     context.user_data.pop("order_draft", None)
+    context.user_data.pop("topup_draft", None)
     user_id = update.effective_user.id
     orders = await database.get_user_orders(user_id, limit=10)
 
@@ -174,12 +206,10 @@ async def my_orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== تدفق طلب الشراء (Order Flow) ====================
 
 async def buy_subscription_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point: Show product categories (Gemini, ChatGPT, Other)"""
+    """Entry point: Show 3-column brand grid to browse products"""
     context.user_data.pop("order_draft", None)
-    text = (
-        "🛍️ **اختر القسم الذي تريده:**\n\n"
-        "🔹 اختر قسماً من الأقسام التالية لعرض الاشتراكات والمنتجات المتاحة:"
-    )
+    context.user_data.pop("topup_draft", None)
+    text = "🛒 **اختر علامة تجارية لتصفح المنتجات:**"
     if update.callback_query:
         await safe_answer(update.callback_query)
         await safe_edit_text(
@@ -198,33 +228,79 @@ async def buy_subscription_entry(update: Update, context: ContextTypes.DEFAULT_T
     return SELECTING_PRODUCT
 
 
-async def category_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle choosing a category: 'gemini', 'chatgpt', 'other'"""
-    query = update.callback_query
-    await safe_answer(query)
-
-    cat = query.data.split(":", 1)[1]
+async def _render_category_products_page(query, cat: str, page: int = 0):
     products = await database.get_products_by_category(cat, only_active=True)
-    stock_status = await supplier_api.get_products_stock_summary(list(products.keys())) if products else None
 
     cat_titles = {
-        "gemini": "💎 **اشتراكات Google Gemini AI:**",
-        "chatgpt": "🤖 **اشتراكات ChatGPT & OpenAI:**",
-        "other": "🛍️ **المنتجات والخدمات الأخرى:**",
+        "gemini": "🟢 ✨ **منتجات واشتراكات Google Gemini:**",
+        "claude": "🔴 ✴️ **منتجات واشتراكات Claude AI:**",
+        "chatgpt": "🤖 **منتجات واشتراكات ChatGPT & OpenAI:**",
+        "kiro": "👻 **منتجات واشتراكات kiro:**",
+        "elevenlabs": "⏸️ **منتجات واشتراكات ElevenLabs:**",
+        "cursor": "🧊 **منتجات واشتراكات Cursor:**",
+        "adobe": "🎨 **منتجات واشتراكات Adobe:**",
+        "grok": "🪐 **منتجات واشتراكات Grok:**",
+        "antigravity": "🚀 **منتجات واشتراكات Antigravity:**",
+        "perplexity": "✳️ **منتجات واشتراكات Perplexity:**",
+        "lovable": "💝 **منتجات واشتراكات Lovable:**",
+        "heygen": "💎 **منتجات واشتراكات HeyGen:**",
+        "capcut": "🎬 **منتجات واشتراكات CapCut:**",
+        "notion": "📓 **منتجات واشتراكات Notion:**",
+        "youtube": "▶️ **منتجات واشتراكات YouTube:**",
+        "runway": "🎥 **منتجات واشتراكات Runway:**",
+        "higgsfield": "⚡ **منتجات واشتراكات Higgsfield:**",
+        "telegram": "⭐ **منتجات واشتراكات Telegram:**",
+        "canva": "🎨 **منتجات واشتراكات Canva:**",
+        "netflix": "🍿 **منتجات واشتراكات Netflix:**",
+        "kling": "🌀 **منتجات واشتراكات Kling:**",
+        "spotify": "🎵 **منتجات واشتراكات Spotify:**",
+        "suno": "🎶 **منتجات واشتراكات Suno:**",
+        "krea": "🖼️ **منتجات واشتراكات Krea:**",
+        "other": "🛍️ **الباقات والمنتجات الرقمية الأخرى:**",
     }
-    title = cat_titles.get(cat, "🛍️ **قائمة المنتجات:**")
+    title = cat_titles.get(cat, f"🛍️ **منتجات {escape_md(cat)}:**")
 
     if not products:
         text = f"{title}\n\n⚠️ عذراً، لا توجد منتجات متوفرة في هذا القسم حالياً."
     else:
-        text = f"{title}\nاختر الباقة المناسبة لك:"
+        total_items = len(products)
+        per_page = 6
+        total_pages = max(1, (total_items + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+        page_note = f" (صفحة {page + 1} من {total_pages})" if total_pages > 1 else ""
+        text = (
+            f"{title}{page_note}\n"
+            f"إجمالي الباقات في هذا القسم: `{total_items}` باقة.\n"
+            "اختر الباقة المناسبة لك (أو اضغط **عرض التالي ➡️** لتصفح المزيد):"
+        )
 
     await safe_edit_text(
         query.message,
         text,
-        reply_markup=keyboards.get_products_keyboard(products, category=cat, stock_status=stock_status),
+        reply_markup=keyboards.get_products_keyboard(
+            products, category=cat, page=page, per_page=6
+        ),
         parse_mode="Markdown",
     )
+
+
+async def category_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle choosing a category: 'gemini', 'claude', 'chatgpt', 'other'"""
+    query = update.callback_query
+    await safe_answer(query)
+    cat = query.data.split(":", 1)[1]
+    await _render_category_products_page(query, cat=cat, page=0)
+    return SELECTING_PRODUCT
+
+
+async def category_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle pagination 'عرض التالي ➡️' / '⬅️ السابق' inside a category"""
+    query = update.callback_query
+    await safe_answer(query)
+    parts = query.data.split(":")
+    cat = parts[1] if len(parts) > 1 else "gemini"
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    await _render_category_products_page(query, cat=cat, page=page)
     return SELECTING_PRODUCT
 
 
@@ -254,10 +330,6 @@ async def product_selected_callback(update: Update, context: ContextTypes.DEFAUL
     cat = product.get("category", "other")
     price_usd = product.get("price_usd", 2.5)
 
-    # Check live stock across local stock and connected suppliers
-    stock_info = await supplier_api.check_total_product_stock(product_id)
-    is_preorder = not stock_info.get("is_in_stock", True)
-
     # Save to draft
     context.user_data["order_draft"] = {
         "product_id": product_id,
@@ -265,31 +337,61 @@ async def product_selected_callback(update: Update, context: ContextTypes.DEFAUL
         "price": product["price"],
         "price_usd": price_usd,
         "category": cat,
-        "is_preorder": is_preorder,
     }
-
-    if is_preorder:
-        stock_notice = (
-            "⚠️ **حالة المخزون:** 🔴 **غير متوفر للتسليم الفوري حالياً (نفد المخزون)**.\n"
-            "📌 **نظام الحجز المسبق:** إذا أردت حجز هذا الاشتراك، أكمل الدفع وسنتواصل معك ونقوم بشرائه وتفعيله لك يدوياً في أقرب وقت! 🌟\n\n"
-            "🔢 **حدد الكمية المطلوبة للمتابعة في الحجز المسبق:**"
-        )
-    else:
-        stock_notice = (
-            "⚡️ **حالة المخزون:** ✅ **متوفر للتسليم الفوري**\n\n"
-            "🔢 **الرجاء تحديد الكمية المطلوبة:**"
-        )
 
     text = (
         f"💎 **لقد اخترت:** {escape_md(product['name'])}\n"
-        f"💵 **السعر:** `{product['price']}` {CURRENCY}\n"
-        f"📝 {escape_md(product.get('description', ''))}\n\n"
-        f"{stock_notice}"
+        f"🇩🇿 **السعر بالدينار:** `{product['price']}` {CURRENCY}\n"
+        f"💵 **السعر بالدولار:** `${price_usd}`\n"
+        f"📝 **الوصف:** {escape_md(product.get('description', ''))}\n\n"
+        "🔢 **الرجاء تحديد الكمية المطلوبة (أو اضغط على زر تعليمات المنتج الأزرق):**"
     )
     await safe_edit_text(
         query.message,
         text,
-        reply_markup=keyboards.get_quantity_keyboard(product_id, category=cat),
+        reply_markup=keyboards.get_quantity_keyboard(
+            product_id, category=cat, is_admin=(query.from_user.id in ADMIN_IDS)
+        ),
+        parse_mode="Markdown",
+    )
+    return SELECTING_QUANTITY
+
+
+async def product_instructions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display detailed product instructions when the customer clicks the blue Instructions button"""
+    query = update.callback_query
+    await safe_answer(query, "📖 تعليمات وشروط المنتج")
+
+    product_id = query.data.split(":", 1)[1]
+    product = await database.get_product_by_id(product_id)
+    if not product:
+        await safe_edit_text(query.message, "⚠️ المنتج غير موجود.")
+        return SELECTING_PRODUCT
+
+    cat = product.get("category", "other")
+    price_dzd = product.get("price", 0)
+    price_usd = product.get("price_usd", 2.5)
+    inst_text = (product.get("instructions") or "").strip()
+    if not inst_text:
+        inst_text = product.get("description") or "اشتراك رسمي مضمون. بعد الشراء ستصلك بيانات أو رابط التفعيل الفوري."
+
+    text = (
+        f"🔵 📖 **تعليمات وشروط المنتج:**\n"
+        f"─────────────────────\n"
+        f"📦 **المنتج:** {escape_md(product['name'])}\n"
+        f"💰 **السعر:** `{price_dzd}` {CURRENCY} | `${price_usd}`\n"
+        f"─────────────────────\n\n"
+        f"📋 **التعليمات وطريقة التفعيل:**\n"
+        f"{escape_md(inst_text)}\n\n"
+        f"─────────────────────\n"
+        f"👇 اضغط على **'🛒 متابعة شراء هذا المنتج'** لاختيار الكمية وإتمام الطلب:"
+    )
+    await safe_edit_text(
+        query.message,
+        text,
+        reply_markup=keyboards.get_product_instructions_back_keyboard(
+            product_id, category=cat, is_admin=(query.from_user.id in ADMIN_IDS)
+        ),
         parse_mode="Markdown",
     )
     return SELECTING_QUANTITY
@@ -301,14 +403,7 @@ async def back_to_products_callback(update: Update, context: ContextTypes.DEFAUL
     await safe_answer(query)
     parts = query.data.split(":")
     cat = parts[1] if len(parts) > 1 else "gemini"
-    products = await database.get_products_by_category(cat, only_active=True)
-    stock_status = await supplier_api.get_products_stock_summary(list(products.keys())) if products else None
-    await safe_edit_text(
-        query.message,
-        "🛍️ **اختر باقة الاشتراك المناسبة لك:**",
-        reply_markup=keyboards.get_products_keyboard(products, category=cat, stock_status=stock_status),
-        parse_mode="Markdown",
-    )
+    await _render_category_products_page(query, cat=cat, page=0)
     return SELECTING_PRODUCT
 
 
@@ -340,23 +435,32 @@ async def quantity_selected_callback(update: Update, context: ContextTypes.DEFAU
     draft["quantity"] = quantity
     context.user_data["order_draft"] = draft
     price_usd = draft.get("price_usd", 2.5)
+    price_dzd = draft.get("price", 1000)
+
+    wallet = await database.get_user_wallet(query.from_user.id)
+    bal_dzd = wallet.get("balance_dzd", 0.0)
+    bal_usd = wallet.get("balance_usd", 0.0)
 
     text = (
         f"📦 **المنتج:** {escape_md(draft['product_name'])}\n"
-        f"🔢 **الكمية:** `{quantity}`\n\n"
+        f"🔢 **الكمية:** `{quantity}`\n"
+        f"💵 **الإجمالي:** `{price_dzd * quantity}` {CURRENCY} أو `${round(price_usd * quantity, 2)}`\n"
+        f"👛 **رصيد محفظتك الحالي:** `{bal_dzd}` {CURRENCY} | `${bal_usd:.2f}`\n\n"
         "💳 **الرجاء اختيار طريقة الدفع المناسبة لك:**"
     )
     await safe_edit_text(
         query.message,
         text,
-        reply_markup=keyboards.get_payment_methods_keyboard(product_id, quantity, price_usd=price_usd),
+        reply_markup=keyboards.get_payment_methods_keyboard(
+            product_id, quantity, price_usd=price_usd, price_dzd=price_dzd
+        ),
         parse_mode="Markdown",
     )
     return SELECTING_PAYMENT
 
 
 async def payment_method_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle chosen payment method (BaridiMob, RedotPay, Bybit)"""
+    """Handle chosen payment method (Wallet DZD/USD, BaridiMob, RedotPay, Bybit)"""
     query = update.callback_query
     await safe_answer(query)
 
@@ -382,6 +486,70 @@ async def payment_method_selected_callback(update: Update, context: ContextTypes
             "is_preorder": not stock_info.get("is_in_stock", True),
         }
 
+    # --- Direct Wallet Payment Option ---
+    if method_id in ("wallet_dzd", "wallet_usd"):
+        wallet = await database.get_user_wallet(query.from_user.id)
+        if method_id == "wallet_dzd":
+            total_price = float(draft.get("price", 1000)) * quantity
+            currency = "دينار"
+            user_bal = float(wallet.get("balance_dzd", 0.0))
+            method_name = "محفظة الدينار 👛"
+        else:
+            price_usd = float(draft.get("price_usd", 2.5))
+            total_price = round(price_usd * quantity, 2)
+            currency = "$"
+            user_bal = float(wallet.get("balance_usd", 0.0))
+            method_name = "محفظة الدولار 👛"
+
+        draft["quantity"] = quantity
+        draft["payment_method"] = method_id
+        draft["payment_method_name"] = method_name
+        draft["total_price"] = total_price
+        draft["currency"] = currency
+        context.user_data["order_draft"] = draft
+
+        if user_bal < total_price:
+            needed = round(total_price - user_bal, 2)
+            insufficient_text = (
+                f"⚠️ **رصيد محفظتك غير كافٍ لإتمام هذه العملية!**\n"
+                f"─────────────────\n"
+                f"📦 **المنتج:** {escape_md(draft['product_name'])} (x{quantity})\n"
+                f"💰 **المبلغ المطلوب:** `{total_price}` {escape_md(currency)}\n"
+                f"👛 **رصيدك الحالي في {method_name}:** `{user_bal}` {escape_md(currency)}\n"
+                f"📉 **المبلغ الناقص:** `{needed}` {escape_md(currency)}\n"
+                f"─────────────────\n\n"
+                "💡 يمكنك شحن محفظتك الآن عبر زر **شحن المحفظة (Top Up)** أو اختيار وسيلة دفع مباشرة أخرى:"
+            )
+            kb = InlineKeyboardMarkup([
+                [keyboards._btn("➕ شحن المحفظة الآن (Top Up Wallet)", callback_data="wallet_menu", style="success")],
+                [keyboards._btn("🔙 اختيار طريقة دفع أخرى", callback_data="change_payment_method", style="primary")],
+                [keyboards._btn("❌ إلغاء الطلب", callback_data="cancel_order")],
+            ])
+            await safe_edit_text(query.message, insufficient_text, reply_markup=kb, parse_mode="Markdown")
+            return SELECTING_PAYMENT
+
+        remaining = round(user_bal - total_price, 2)
+        confirm_text = (
+            f"👛 **تأكيد الدفع الفوري من المحفظة:**\n"
+            f"─────────────────\n"
+            f"📦 **المنتج:** {escape_md(draft['product_name'])}\n"
+            f"🔢 **الكمية:** `{quantity}`\n"
+            f"💳 **طريقة الدفع:** {method_name}\n"
+            f"💰 **المبلغ المطلوب خصمه:** `{total_price}` {escape_md(currency)}\n"
+            f"👛 **رصيدك الحالي:** `{user_bal}` {escape_md(currency)}\n"
+            f"✅ **الرصيد المتبقي بعد الشراء:** `{remaining}` {escape_md(currency)}\n"
+            f"─────────────────\n\n"
+            "👇 اضغط على الزر الأخضر بالأسفل لتأكيد الخصم واستلام اشتراكك فوراً:"
+        )
+        await safe_edit_text(
+            query.message,
+            confirm_text,
+            reply_markup=keyboards.get_wallet_pay_confirm_keyboard(product_id),
+            parse_mode="Markdown",
+        )
+        return SELECTING_PAYMENT
+
+    # --- Standard External Payment Methods (BaridiMob, RedotPay, Bybit) ---
     method = PAYMENT_METHODS.get(method_id, PAYMENT_METHODS["baridimob"])
 
     if method_id == "baridimob":
@@ -401,22 +569,14 @@ async def payment_method_selected_callback(update: Update, context: ContextTypes
     draft["currency"] = currency
     context.user_data["order_draft"] = draft
 
-    is_preorder = draft.get("is_preorder", False)
-    preorder_notice = (
-        "⚠️ **تنبيه:** هذا الطلب بنظام **الحجز المسبق** (المنتج غير متوفر للتسليم الفوري).\n"
-        "سيقوم المشرف بشرائه وتفعيله لك يدوياً والتواصل معك فور استلام الحوالة.\n"
-        "─────────────────\n"
-    ) if is_preorder else ""
-
     summary_text = (
-        f"📋 **ملخص طلبك{' (حجز مسبق ⏳)' if is_preorder else ''}:**\n"
+        f"📋 **ملخص طلبك:**\n"
         f"─────────────────\n"
         f"📦 **المنتج:** {escape_md(draft['product_name'])}\n"
         f"🔢 **الكمية:** `{quantity}`\n"
         f"💳 **طريقة الدفع:** {escape_md(method['name'])}\n"
         f"💰 **المبلغ الإجمالي المطلوب:** `{total_price}` {escape_md(currency)}\n"
         f"─────────────────\n"
-        f"{preorder_notice}"
         f"{instructions}\n\n"
         "👇 اضغط على الزر بالأسفل عندما تكون جاهزاً لإرسال إشعار التحويل ورقم الحوالة:"
     )
@@ -428,6 +588,144 @@ async def payment_method_selected_callback(update: Update, context: ContextTypes
         parse_mode="Markdown",
     )
     return AWAITING_RECEIPT
+
+
+async def confirm_wallet_pay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deduct balance from customer's wallet and fulfill order immediately"""
+    query = update.callback_query
+    user = query.from_user
+    draft = context.user_data.get("order_draft")
+    if not draft:
+        await safe_answer(query, "⚠️ انتهت الجلسة، يرجى إعادة الطلب.", show_alert=True)
+        return ConversationHandler.END
+
+    method_id = draft.get("payment_method", "wallet_dzd")
+    total_price = float(draft.get("total_price", 0))
+    currency = draft.get("currency", "دينار")
+    product_id = draft["product_id"]
+    quantity = int(draft.get("quantity", 1))
+
+    wallet = await database.get_user_wallet(user.id)
+    if method_id == "wallet_dzd":
+        if float(wallet.get("balance_dzd", 0.0)) < total_price:
+            await safe_answer(query, "⚠️ رصيد محفظة الدينار غير كافٍ!", show_alert=True)
+            return SELECTING_PAYMENT
+        await safe_answer(query, "⏳ جاري خصم الرصيد وتجهيز اشتراكك...")
+        updated_wallet = await database.add_wallet_balance(
+            user.id,
+            amount_dzd=-total_price,
+            amount_usd=0.0,
+            user_name=user.full_name or "",
+            user_username=f"@{user.username}" if user.username else "",
+        )
+    else:
+        if float(wallet.get("balance_usd", 0.0)) < total_price:
+            await safe_answer(query, "⚠️ رصيد محفظة الدولار غير كافٍ!", show_alert=True)
+            return SELECTING_PAYMENT
+        await safe_answer(query, "⏳ جاري خصم الرصيد وتجهيز اشتراكك...")
+        updated_wallet = await database.add_wallet_balance(
+            user.id,
+            amount_dzd=0.0,
+            amount_usd=-total_price,
+            user_name=user.full_name or "",
+            user_username=f"@{user.username}" if user.username else "",
+        )
+
+    pay_method_name = draft.get("payment_method_name", "محفظة المتجر 👛")
+    transfer_ref = f"مدفوع من المحفظة ({total_price} {currency})"
+    draft["transfer_number"] = transfer_ref
+    draft["receipt_file_id"] = ""
+
+    order_id, order_code = await database.create_order(
+        user_id=user.id,
+        user_name=user.full_name or "مستخدم",
+        user_username=f"@{user.username}" if user.username else "بدون يوزر",
+        product_id=product_id,
+        product_name=draft["product_name"],
+        quantity=quantity,
+        total_price=total_price,
+        transfer_number=transfer_ref,
+        receipt_file_id="",
+        payment_method=pay_method_name,
+        currency=currency,
+    )
+
+    order_obj = await database.get_order_by_id(order_id) or {
+        "id": order_id,
+        "order_code": order_code,
+        "user_id": user.id,
+        "user_name": user.full_name or "مستخدم",
+        "user_username": f"@{user.username}" if user.username else "بدون يوزر",
+        "product_id": product_id,
+        "product_name": draft["product_name"],
+        "quantity": quantity,
+        "total_price": total_price,
+        "currency": currency,
+        "payment_method": pay_method_name,
+    }
+
+    import handlers_admin as adm
+
+    # 1. Try immediate delivery from local stock
+    delivered_links = []
+    delivery_source = ""
+    available_links = await database.get_available_links_from_stock(product_id, quantity)
+    if len(available_links) >= quantity:
+        link_ids = [l["id"] for l in available_links]
+        delivered_links = [l["link_url"] for l in available_links]
+        await database.consume_stock_links(link_ids, order_id, user.id)
+        await database.mark_order_approved(order_id, delivered_links)
+        delivery_source = "المخزن المحلي"
+    else:
+        # 2. Try automatic purchase via Supplier APIs
+        api_success, api_links, api_msg, provider_used = await supplier_api.purchase_with_fallback(
+            local_product_id=product_id,
+            quantity=quantity,
+            order_code=order_code,
+        )
+        if api_success and api_links:
+            delivered_links = api_links
+            await database.mark_order_approved(order_id, delivered_links)
+            delivery_source = f"API المورد ({provider_used})"
+
+    context.user_data.pop("order_draft", None)
+
+    if delivered_links:
+        await adm.deliver_links_to_customer(context, order_obj, delivered_links)
+        await safe_edit_text(
+            query.message,
+            f"✅ **تم الدفع من محفظتك وتسليم الطلب `{order_code}` فوراً!**\n\n"
+            f"📦 **المنتج:** {escape_md(draft['product_name'])}\n"
+            f"💰 **المبلغ المخصوم:** `{total_price}` {escape_md(currency)}\n"
+            f"👛 **رصيد محفظتك المتبقي:** `{updated_wallet['balance_dzd']}` {CURRENCY} | `${updated_wallet['balance_usd']:.2f}`\n\n"
+            "تم إرسال روابط/بيانات التفعيل في الرسالة أعلاه. شكراً لثقتك بنا! 🚀",
+            parse_mode="Markdown",
+        )
+        # Notify Admins of completed wallet order
+        admin_note = (
+            f"👛 ✅ **عملية شراء فورية ناجحة عبر المحفظة (`{order_code}`)**\n"
+            f"─────────────────\n"
+            f"👤 **العميل:** {escape_md(user.full_name)} ({escape_md('@' + user.username if user.username else 'بدون يوزر')}) | ID: `{user.id}`\n"
+            f"📦 **المنتج:** {escape_md(draft['product_name'])} (x`{quantity}`)\n"
+            f"💰 **المبلغ المخصوم:** `{total_price}` {escape_md(currency)} ({escape_md(pay_method_name)})\n"
+            f"⚡ **التسليم:** تم التسليم تلقائياً من **{escape_md(delivery_source)}**."
+        )
+        for admin_id in ADMIN_IDS:
+            await adm.safe_send_message(context.bot, admin_id, admin_note, parse_mode="Markdown")
+        return ConversationHandler.END
+
+    # 3. If not in stock / requires manual fulfillment, keep order PENDING and notify Admin
+    await safe_edit_text(
+        query.message,
+        f"🎉 **تم خصم المبلغ من محفظتك وتأكيد طلبك `{order_code}` بنجاح!**\n\n"
+        f"📦 **المنتج:** {escape_md(draft['product_name'])} (x`{quantity}`)\n"
+        f"💰 **المبلغ المدفوع:** `{total_price}` {escape_md(currency)}\n"
+        f"👛 **رصيد محفظتك المتبقي:** `{updated_wallet['balance_dzd']}` {CURRENCY} | `${updated_wallet['balance_usd']:.2f}`\n\n"
+        "⏳ **حالة الطلب:** جاري تجهيز الحساب/الرابط يدوياً من قبل المشرف وسيصلك هنا في أقرب وقت! 🌟",
+        parse_mode="Markdown",
+    )
+    await notify_admins_new_order(context, order_id, order_code, user, draft)
+    return ConversationHandler.END
 
 
 async def change_payment_method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -442,6 +740,7 @@ async def change_payment_method_callback(update: Update, context: ContextTypes.D
 
     quantity = draft.get("quantity", 1)
     price_usd = draft.get("price_usd", 2.5)
+    price_dzd = draft.get("price", 1000)
 
     text = (
         f"📦 **المنتج:** {escape_md(draft.get('product_name'))}\n"
@@ -451,7 +750,9 @@ async def change_payment_method_callback(update: Update, context: ContextTypes.D
     await safe_edit_text(
         query.message,
         text,
-        reply_markup=keyboards.get_payment_methods_keyboard(product_id, quantity, price_usd=price_usd),
+        reply_markup=keyboards.get_payment_methods_keyboard(
+            product_id, quantity, price_usd=price_usd, price_dzd=price_dzd
+        ),
         parse_mode="Markdown",
     )
     return SELECTING_PAYMENT
@@ -509,6 +810,11 @@ async def receipt_photo_received(update: Update, context: ContextTypes.DEFAULT_T
 
 async def transfer_number_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle transfer number text input"""
+    import handlers_admin as adm
+    if adm.has_active_admin_prompt(update.effective_user.id, context):
+        await adm.handle_admin_text_input(update, context)
+        return ConversationHandler.END
+
     text = (update.message.text or "").strip()
     draft = context.user_data.get("order_draft")
     if not draft:
@@ -546,36 +852,21 @@ async def finalize_order_submission(update: Update, context: ContextTypes.DEFAUL
         currency=pay_curr,
     )
 
-    # Customer success message
-    is_preorder = draft.get("is_preorder", False)
     pname_safe = escape_md(draft["product_name"])
     tnum_safe = escape_md(draft.get("transfer_number"))
     pm_safe = escape_md(pay_method)
     curr_safe = escape_md(pay_curr)
 
-    if is_preorder:
-        customer_msg = (
-            f"🎉 **تم استلام طلب الحجز المسبق بنجاح!**\n\n"
-            f"🔹 **رقم الطلب:** `{order_code}`\n"
-            f"📦 **المنتج:** {pname_safe}\n"
-            f"🔢 **الكمية:** `{draft['quantity']}`\n"
-            f"💳 **طريقة الدفع:** {pm_safe}\n"
-            f"💰 **المبلغ:** `{draft['total_price']}` {curr_safe}\n"
-            f"🧾 **رقم التحويل:** `{tnum_safe}`\n\n"
-            "⏳ **حالة الطلب:** حجز مسبق قيد المراجعة والتجهيز اليدوي.\n"
-            "سنقوم بالتحقق من الحوالة وتفعيل اشتراكك والتواصل معك هنا مباشرة لتسليمك الحساب في أقرب وقت. شكراً لصبرك وثقتك بنا! 🌟"
-        )
-    else:
-        customer_msg = (
-            f"🎉 **تم إرسال طلبك بنجاح!**\n\n"
-            f"🔹 **رقم الطلب:** `{order_code}`\n"
-            f"📦 **المنتج:** {pname_safe}\n"
-            f"🔢 **الكمية:** `{draft['quantity']}`\n"
-            f"💳 **طريقة الدفع:** {pm_safe}\n"
-            f"💰 **المبلغ:** `{draft['total_price']}` {curr_safe}\n"
-            f"🧾 **رقم التحويل:** `{tnum_safe}`\n\n"
-            "⏳ جاري التحقق من إشعار التحويل من قبل الإدارة. ستصلك روابط التفعيل هنا في المحادثة فور التأكيد!"
-        )
+    customer_msg = (
+        f"🎉 **تم إرسال طلبك بنجاح!**\n\n"
+        f"🔹 **رقم الطلب:** `{order_code}`\n"
+        f"📦 **المنتج:** {pname_safe}\n"
+        f"🔢 **الكمية:** `{draft['quantity']}`\n"
+        f"💳 **طريقة الدفع:** {pm_safe}\n"
+        f"💰 **المبلغ:** `{draft['total_price']}` {curr_safe}\n"
+        f"🧾 **رقم التحويل:** `{tnum_safe}`\n\n"
+        "⏳ جاري التحقق من إشعار التحويل من قبل الإدارة. ستصلك روابط التفعيل هنا في المحادثة فور التأكيد!"
+    )
     await safe_reply_text(
         update.message,
         customer_msg,
@@ -583,12 +874,8 @@ async def finalize_order_submission(update: Update, context: ContextTypes.DEFAUL
         parse_mode="Markdown",
     )
 
-    # Notify Admins
     await notify_admins_new_order(context, order_id, order_code, user, draft)
-
-    # Clear draft
     context.user_data.pop("order_draft", None)
-
     return ConversationHandler.END
 
 
@@ -599,7 +886,7 @@ async def notify_admins_new_order(
     user,
     draft: dict,
 ):
-    """Send photo and order details to all registered admins with guaranteed fallback"""
+    """Send photo (or text card if wallet-paid) and order details to all registered admins"""
     stock_counts = await database.get_stock_counts()
     available_stock = stock_counts.get(draft["product_id"], 0)
     pay_method = draft.get("payment_method_name", "بريدي موب")
@@ -633,11 +920,26 @@ async def notify_admins_new_order(
     )
 
     kb = keyboards.get_admin_order_keyboard(order_id)
+    receipt_fid = draft.get("receipt_file_id")
+
     for admin_id in ADMIN_IDS:
+        if not receipt_fid:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_caption,
+                    reply_markup=kb,
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                clean_caption = admin_caption.replace("**", "").replace("`", "").replace("\\_", "_").replace("\\*", "*")
+                await context.bot.send_message(chat_id=admin_id, text=clean_caption, reply_markup=kb)
+            continue
+
         try:
             await context.bot.send_photo(
                 chat_id=admin_id,
-                photo=draft["receipt_file_id"],
+                photo=receipt_fid,
                 caption=admin_caption,
                 reply_markup=kb,
                 parse_mode="Markdown",
@@ -648,7 +950,7 @@ async def notify_admins_new_order(
             try:
                 await context.bot.send_photo(
                     chat_id=admin_id,
-                    photo=draft["receipt_file_id"],
+                    photo=receipt_fid,
                     caption=clean_caption,
                     reply_markup=kb,
                 )
@@ -664,12 +966,423 @@ async def notify_admins_new_order(
                     logger.error(f"Could not notify admin {admin_id} at all: {e3}")
 
 
-async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel order conversation"""
+# ==================== محفظة العميل وشحن الرصيد (Customer Wallet & Top-Up Flow) ====================
+
+async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display Customer Dual-Currency Wallet (DZD & USD) and Top-Up options"""
     context.user_data.pop("order_draft", None)
+    context.user_data.pop("topup_draft", None)
+    user = update.effective_user
+    wallet = await database.get_user_wallet(
+        user.id,
+        user_name=user.full_name or "",
+        user_username=f"@{user.username}" if user.username else "",
+    )
+
+    bal_dzd = float(wallet.get("balance_dzd", 0.0))
+    bal_usd = float(wallet.get("balance_usd", 0.0))
+    dzd_str = f"{int(bal_dzd)}" if bal_dzd.is_integer() else f"{bal_dzd:.2f}"
+    usd_str = f"{bal_usd:.2f}"
+
+    text = (
+        f"👛 **محفظتي الإلكترونية (TOP UP WALLET)**\n"
+        f"─────────────────────\n"
+        f"👤 **الحساب:** {escape_md(user.full_name)} (`{user.id}`)\n\n"
+        f"🇩🇿 **الرصيد بالدينار الجزائري:** `{dzd_str}` {CURRENCY}\n"
+        f"💵 **الرصيد بالدولار الأمريكي:** `${usd_str}`\n"
+        f"─────────────────────\n"
+        "💡 **كيف تعمل المحفظة؟**\n"
+        "1. اختر العملة التي تريد شحنها (**دينار** أو **دولار**).\n"
+        "2. أدخل المبلغ الذي تريد إضافته لمحفظتك وقم بالتحويل.\n"
+        "3. أرسل تأكيد التحويل أو صورة الوصل، وبمجرد تأكيد الإدارة يظهر الرصيد فوراً في محفظتك لتشتري به أي منتج بضغطة زر!\n\n"
+        "👇 اختر العملية المطلوبة بالأسفل:"
+    )
+
     if update.callback_query:
         await safe_answer(update.callback_query)
-        await safe_edit_text(update.callback_query.message, "❌ تم إلغاء الطلب.")
+        await safe_edit_text(
+            update.callback_query.message,
+            text,
+            reply_markup=keyboards.get_wallet_main_keyboard(),
+            parse_mode="Markdown",
+        )
+    else:
+        await safe_reply_text(
+            update.message,
+            text,
+            reply_markup=keyboards.get_wallet_main_keyboard(),
+            parse_mode="Markdown",
+        )
+    return SELECTING_PRODUCT
+
+
+async def wallet_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show customer's recent wallet top-up requests"""
+    query = update.callback_query
+    await safe_answer(query)
+    user_id = query.from_user.id
+    topups = await database.get_user_topups(user_id, limit=10)
+
+    if not topups:
+        text = (
+            "📜 **سجل عمليات شحن المحفظة:**\n\n"
+            "لا توجد لديك أي طلبات شحن سابقة حتى الآن.\n"
+            "اضغط على **شحن المحفظة** بالأسفل لإضافة رصيدك الأول!"
+        )
+    else:
+        text = "📜 **آخر عمليات شحن المحفظة الخاصة بك:**\n─────────────────────\n"
+        for t in topups:
+            st = t.get("status", "PENDING")
+            st_badge = {
+                "PENDING": "⏳ قيد المراجعة",
+                "APPROVED": "✅ تمت إضافة الرصيد",
+                "REJECTED": "❌ مرفوض",
+            }.get(st, st)
+            tcode = t.get("topup_code") or f"TOP-{t['id']:04d}"
+            text += (
+                f"🔹 `{tcode}` — `{t.get('amount')}` {escape_md(t.get('currency'))}\n"
+                f"• الوسيلة: {escape_md(t.get('payment_method'))} | الحالة: {st_badge}\n"
+                f"• التاريخ: `{format_dt(t.get('created_at'))}`\n"
+            )
+            if st == "REJECTED" and t.get("reject_reason"):
+                text += f"• سبب الرفض: {escape_md(t['reject_reason'])}\n"
+            text += "───────────────\n"
+
+    await safe_edit_text(
+        query.message,
+        text,
+        reply_markup=keyboards.get_wallet_main_keyboard(),
+        parse_mode="Markdown",
+    )
+    return SELECTING_PRODUCT
+
+
+async def wallet_topup_curr_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer selects currency to top up: 'dzd' or 'usd'"""
+    query = update.callback_query
+    await safe_answer(query)
+
+    curr_code = query.data.split(":", 1)[1].lower()
+    currency_label = "دينار" if curr_code == "dzd" else "$"
+    context.user_data["topup_draft"] = {
+        "curr_code": curr_code,
+        "currency": currency_label,
+    }
+
+    if curr_code == "dzd":
+        text = (
+            "🇩🇿 **شحن المحفظة بالدينار الجزائري (Top Up DZD):**\n"
+            "─────────────────────\n"
+            "✍️ **أدخل المبلغ بالدينار الذي تريد شحنه في محفظتك (أرقام فقط، أو اختر من الأزرار السريعة بالأسفل):**\n"
+            "مثال: `2000` أو `5000`"
+        )
+    else:
+        text = (
+            "💵 **شحن المحفظة بالدولار الأمريكي (Top Up USD):**\n"
+            "─────────────────────\n"
+            "✍️ **أدخل المبلغ بالدولار (`$`) الذي تريد شحنه في محفظتك (أرقام فقط، أو اختر من الأزرار السريعة بالأسفل):**\n"
+            "مثال: `10` أو `25`"
+        )
+
+    await safe_edit_text(
+        query.message,
+        text,
+        reply_markup=keyboards.get_wallet_amount_presets_keyboard(curr_code),
+        parse_mode="Markdown",
+    )
+    return AWAITING_TOPUP_AMOUNT
+
+
+async def _show_topup_payment_step(message_or_query, context: ContextTypes.DEFAULT_TYPE, is_callback: bool):
+    draft = context.user_data.get("topup_draft", {})
+    curr_code = draft.get("curr_code", "dzd")
+    amount = draft.get("amount", 0)
+
+    if curr_code == "dzd":
+        draft["payment_method"] = "بريدي موب (BaridiMob)"
+        context.user_data["topup_draft"] = draft
+        pay_info = await database.get_payment_info()
+        text = (
+            f"👛 **شحن المحفظة بمبلغ `{amount}` {CURRENCY}**\n"
+            f"─────────────────────\n"
+            f"💳 **طريقة التحويل:** بريدي موب (BaridiMob)\n"
+            f"💰 **المبلغ المطلوب تحويله:** `{amount}` {CURRENCY}\n"
+            f"─────────────────────\n"
+            f"{pay_info}\n\n"
+            "👇 بعد إتمام التحويل، اضغط على الزر الأخضر بالأسفل لإرسال الوصل أو تأكيد التحويل:"
+        )
+        kb = keyboards.get_wallet_confirm_transfer_keyboard()
+    else:
+        text = (
+            f"👛 **شحن المحفظة بمبلغ `${amount}` دولار**\n"
+            f"─────────────────────\n"
+            "💳 **اختر وسيلة الدفع بالدولار التي تود التحويل عبرها:**"
+        )
+        kb = keyboards.get_wallet_usd_methods_keyboard(amount)
+
+    if is_callback:
+        await safe_edit_text(message_or_query.message, text, reply_markup=kb, parse_mode="Markdown")
+    else:
+        await safe_reply_text(message_or_query, text, reply_markup=kb, parse_mode="Markdown")
+
+
+async def wallet_amount_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer tapped a preset amount button for Wallet Top-Up"""
+    query = update.callback_query
+    await safe_answer(query)
+    parts = query.data.split(":")
+    curr_code = parts[1].lower()
+    amount = float(parts[2])
+
+    context.user_data["topup_draft"] = {
+        "curr_code": curr_code,
+        "currency": "دينار" if curr_code == "dzd" else "$",
+        "amount": amount,
+    }
+    await _show_topup_payment_step(query, context, is_callback=True)
+    return AWAITING_TOPUP_AMOUNT
+
+
+async def wallet_amount_text_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer typed a custom amount for Wallet Top-Up"""
+    import handlers_admin as adm
+    if adm.has_active_admin_prompt(update.effective_user.id, context):
+        await adm.handle_admin_text_input(update, context)
+        return ConversationHandler.END
+
+    raw = (update.message.text or "").strip().replace(",", ".").replace("$", "").replace("دج", "").strip()
+    draft = context.user_data.get("topup_draft")
+    if not draft:
+        return await wallet_command(update, context)
+
+    try:
+        amount = float(raw)
+        if amount <= 0:
+            raise ValueError()
+    except ValueError:
+        await safe_reply_text(
+            update.message,
+            "⚠️ يرجى إدخال مبلغ رقمي صحيح أكبر من الصفر (مثال: `2000` أو `10`).",
+            parse_mode="Markdown",
+        )
+        return AWAITING_TOPUP_AMOUNT
+
+    draft["amount"] = round(amount, 2) if draft.get("curr_code") == "usd" else int(amount)
+    context.user_data["topup_draft"] = draft
+    await _show_topup_payment_step(update.message, context, is_callback=False)
+    return AWAITING_TOPUP_AMOUNT
+
+
+async def wallet_paym_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer selected USD payment method (RedotPay or Bybit) for Wallet Top-Up"""
+    query = update.callback_query
+    await safe_answer(query)
+    parts = query.data.split(":")
+    curr_code = parts[1]
+    amount = float(parts[2])
+    method_key = parts[3]
+
+    method_info = PAYMENT_METHODS.get(method_key, PAYMENT_METHODS["redotpay"])
+    draft = context.user_data.get("topup_draft", {})
+    draft["curr_code"] = curr_code
+    draft["currency"] = "$"
+    draft["amount"] = amount
+    draft["payment_method"] = method_info["name"]
+    context.user_data["topup_draft"] = draft
+
+    text = (
+        f"👛 **شحن المحفظة بمبلغ `${amount}` دولار**\n"
+        f"─────────────────────\n"
+        f"💳 **وسيلة الدفع:** {escape_md(method_info['name'])}\n"
+        f"💰 **المبلغ المطلوب تحويله:** `${amount}`\n"
+        f"─────────────────────\n"
+        f"{method_info['details']}\n\n"
+        "👇 بعد إتمام التحويل، اضغط على الزر الأخضر بالأسفل لإرسال الوصل أو تأكيد العملية:"
+    )
+    await safe_edit_text(
+        query.message,
+        text,
+        reply_markup=keyboards.get_wallet_confirm_transfer_keyboard(),
+        parse_mode="Markdown",
+    )
+    return AWAITING_TOPUP_AMOUNT
+
+
+async def wallet_upload_proof_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer clicked 'I transferred' and is ready to send receipt photo or transfer confirmation"""
+    query = update.callback_query
+    await safe_answer(query)
+    draft = context.user_data.get("topup_draft")
+    if not draft or not draft.get("amount"):
+        return await wallet_command(update, context)
+
+    text = (
+        f"📤 **تأكيد شحن المحفظة بمبلغ `{draft['amount']}` {escape_md(draft['currency'])}**\n"
+        f"─────────────────────\n"
+        "📸 **أرسل الآن صورة وصل التحويل (Screenshot)**، أو **اكتب رقم عملية التحويل / رسالة تأكيد بأنك قمت بالتحويل** في المحادثة:\n\n"
+        "⏳ سيقوم المشرف بمراجعة الحوالة والموافقة عليها ليظهر الرصيد في محفظتك فوراً!"
+    )
+    await safe_edit_text(query.message, text, parse_mode="Markdown")
+    await safe_reply_text(
+        query.message,
+        "أرسل صورة الوصل أو رقم التحويل الآن (أو اضغط '❌ إلغاء العملية' للتراجع):",
+        reply_markup=keyboards.get_cancel_reply_keyboard(),
+    )
+    return AWAITING_TOPUP_PROOF
+
+
+async def wallet_proof_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo OR text proof sent by customer for Wallet Top-Up"""
+    import handlers_admin as adm
+    if update.message and update.message.text and adm.has_active_admin_prompt(update.effective_user.id, context):
+        await adm.handle_admin_text_input(update, context)
+        return ConversationHandler.END
+
+    message = update.message
+    user = update.effective_user
+    draft = context.user_data.get("topup_draft")
+    if not draft or not draft.get("amount"):
+        await safe_reply_text(
+            message,
+            "⚠️ انتهت الجلسة، يرجى فتح المحفظة والمحاولة من جديد.",
+            reply_markup=keyboards.get_main_menu(user.id),
+        )
+        return ConversationHandler.END
+
+    receipt_file_id = ""
+    transfer_number = ""
+
+    if message.photo:
+        receipt_file_id = message.photo[-1].file_id
+        transfer_number = (message.caption or "").strip() or "مرفق بصورة الوصل"
+    else:
+        transfer_number = (message.text or "").strip()
+
+    amount = draft["amount"]
+    currency = draft.get("currency", "دينار")
+    pay_method = draft.get("payment_method", "بريدي موب")
+
+    topup_id, topup_code = await database.create_wallet_topup(
+        user_id=user.id,
+        user_name=user.full_name or "عميل",
+        user_username=f"@{user.username}" if user.username else "بدون يوزر",
+        amount=amount,
+        currency=currency,
+        payment_method=pay_method,
+        transfer_number=transfer_number,
+        receipt_file_id=receipt_file_id,
+    )
+
+    context.user_data.pop("topup_draft", None)
+
+    cust_msg = (
+        f"🎉 **تم إرسال طلب شحن المحفظة بنجاح!**\n"
+        f"─────────────────────\n"
+        f"🔹 **رقم العملية:** `{topup_code}`\n"
+        f"💰 **المبلغ المطلوب إضافته:** `{amount}` {escape_md(currency)}\n"
+        f"💳 **وسيلة الدفع:** {escape_md(pay_method)}\n"
+        f"🧾 **المرجع / التأكيد:** `{escape_md(transfer_number)}`\n"
+        f"─────────────────────\n"
+        "⏳ **الحالة:** بانتظار تأكيد الإدارة.\n"
+        "بمجرد التحقق من وصول المبلغ والموافقة عليه سيصلك إشعار فوري هنا ويُضاف الرصيد إلى محفظتك! 🌟"
+    )
+    await safe_reply_text(
+        message,
+        cust_msg,
+        reply_markup=keyboards.get_main_menu(user.id),
+        parse_mode="Markdown",
+    )
+
+    # Notify Admins immediately
+    await notify_admins_new_topup(
+        context=context,
+        topup_id=topup_id,
+        topup_code=topup_code,
+        user=user,
+        amount=amount,
+        currency=currency,
+        payment_method=pay_method,
+        transfer_number=transfer_number,
+        receipt_file_id=receipt_file_id,
+    )
+    return ConversationHandler.END
+
+
+async def notify_admins_new_topup(
+    context: ContextTypes.DEFAULT_TYPE,
+    topup_id: int,
+    topup_code: str,
+    user,
+    amount: float,
+    currency: str,
+    payment_method: str,
+    transfer_number: str,
+    receipt_file_id: str,
+):
+    """Send immediate notification to Admins to verify and approve a Wallet Top-Up"""
+    wallet = await database.get_user_wallet(user.id)
+    uname_safe = escape_md(user.full_name or "عميل")
+    uuser_safe = escape_md(f"@{user.username}" if user.username else "بدون يوزر")
+
+    admin_text = (
+        f"👛 **طلب شحن محفظة جديد (TOP UP): `{topup_code}`**\n"
+        f"─────────────────────\n"
+        f"👤 **العميل:** {uname_safe} ({uuser_safe})\n"
+        f"🆔 **معرف العميل (ID):** `{user.id}`\n\n"
+        f"💰 **المبلغ المطلوب شحنه:** `{amount}` {escape_md(currency)}\n"
+        f"💳 **طريقة التحويل:** {escape_md(payment_method)}\n"
+        f"🧾 **المرجع / التأكيد:** `{escape_md(transfer_number)}`\n"
+        f"─────────────────────\n"
+        f"📊 **رصيد العميل الحالي قبل الشحن:**\n"
+        f"• بالدينار: `{wallet.get('balance_dzd', 0)}` {CURRENCY}\n"
+        f"• بالدولار: `${wallet.get('balance_usd', 0):.2f}`\n\n"
+        "👇 بعد التأكد من وصول المال، اضغط **موافقة وإضافة الرصيد للمحفظة**:"
+    )
+    kb = keyboards.get_admin_topup_keyboard(topup_id, user.id)
+
+    for admin_id in ADMIN_IDS:
+        if receipt_file_id:
+            try:
+                await context.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=receipt_file_id,
+                    caption=admin_text,
+                    reply_markup=kb,
+                    parse_mode="Markdown",
+                )
+                continue
+            except Exception:
+                clean_cap = admin_text.replace("**", "").replace("`", "").replace("\\_", "_")
+                try:
+                    await context.bot.send_photo(
+                        chat_id=admin_id,
+                        photo=receipt_file_id,
+                        caption=clean_cap,
+                        reply_markup=kb,
+                    )
+                    continue
+                except Exception:
+                    pass
+
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                reply_markup=kb,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            clean_txt = admin_text.replace("**", "").replace("`", "").replace("\\_", "_")
+            await context.bot.send_message(chat_id=admin_id, text=clean_txt, reply_markup=kb)
+
+
+async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel order or wallet topup conversation"""
+    context.user_data.pop("order_draft", None)
+    context.user_data.pop("topup_draft", None)
+    if update.callback_query:
+        await safe_answer(update.callback_query)
+        await safe_edit_text(update.callback_query.message, "❌ تم إلغاء العملية.")
     else:
         await safe_reply_text(
             update.message,
@@ -810,8 +1523,7 @@ async def handle_customer_inbound_photo(update: Update, context: ContextTypes.DE
 
     await safe_reply_text(
         update.message,
-        "✅ **تم استلام الصورة وإرسالها للإدارة بنجاح.**\n"
-        "شكراً لك، سنرد عليك في أقرب وقت! 🌟",
+        "✅ **تم استلام الصورة وإرسالها لإدارة المتجر بنجاح.**\n"
+        "سيقوم المشرف بمراجعتها والرد عليك قريباً.",
         parse_mode="Markdown",
     )
-

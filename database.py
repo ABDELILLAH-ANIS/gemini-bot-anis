@@ -130,6 +130,7 @@ async def init_db():
                 price_usd REAL DEFAULT 2.5,
                 category TEXT DEFAULT 'other',
                 description TEXT DEFAULT '',
+                instructions TEXT DEFAULT '',
                 supplier_product_id INTEGER NULL,
                 is_active INTEGER DEFAULT 1
             );
@@ -143,6 +144,40 @@ async def init_db():
             await db.execute("ALTER TABLE products ADD COLUMN price_usd REAL DEFAULT 2.5")
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE products ADD COLUMN instructions TEXT DEFAULT ''")
+        except Exception:
+            pass
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wallets (
+                user_id INTEGER PRIMARY KEY,
+                user_name TEXT DEFAULT '',
+                user_username TEXT DEFAULT '',
+                balance_dzd REAL DEFAULT 0.0,
+                balance_usd REAL DEFAULT 0.0,
+                updated_at TEXT
+            );
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_topups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topup_code TEXT,
+                user_id INTEGER,
+                user_name TEXT,
+                user_username TEXT,
+                amount REAL,
+                currency TEXT DEFAULT 'دينار',
+                payment_method TEXT DEFAULT 'بريدي موب',
+                transfer_number TEXT DEFAULT '',
+                receipt_file_id TEXT DEFAULT '',
+                status TEXT DEFAULT 'PENDING',
+                reject_reason TEXT DEFAULT '',
+                created_at TEXT,
+                updated_at TEXT
+            );
+        """)
 
         # Seed products locally
         initial_products = [
@@ -155,18 +190,18 @@ async def init_db():
             ("chatgpt_plus_4m", "ChatGPT Plus (4 أشهر)", 6000.0, 25.0, "chatgpt", "🤖 اشتراك شات جي بي تي بلس الأصلي لمدة 4 أشهر كاملة مع ميزات GPT-4o وتوليد الصور المتقدمة.", 90, 1),
             ("codex_api_10m", "Codex API (10M Tokens)", 1000.0, 2.5, "chatgpt", "💻 رصيد 10 مليون توكن API لـ OpenAI Codex للمطورين والمبرمجين مع ضمان كامل.", 36, 1),
 
-            # 3. Other Products & Digital Subscriptions
-            ("youtube_premium_3m", "YouTube Premium (3 أشهر)", 800.0, 3.5, "other", "🔴 اشتراك يوتيوب بريميوم رسمي لمدة 3 أشهر بدون إعلانات مع تشغيل بالخلفية وYouTube Music.", None, 1),
+            # 3. Other Brands & Digital Subscriptions
+            ("youtube_premium_3m", "YouTube Premium (3 أشهر)", 800.0, 3.5, "youtube", "🔴 اشتراك يوتيوب بريميوم رسمي لمدة 3 أشهر بدون إعلانات مع تشغيل بالخلفية وYouTube Music.", None, 1),
             ("nordvpn_3m", "NordVPN Basic (3 أشهر)", 900.0, 4.0, "other", "🛡 اشتراك نورد في بي إن الأصلي لمدة 3 أشهر لحماية خصوصيتك وتصفح آمن على 10 أجهزة مع ضمان كامل.", None, 1),
             ("coursera_12m", "Coursera Premium (12 شهر)", 800.0, 3.5, "other", "🎓 وصول بريميوم كامل لمنصة كورسيرا لمدة سنة مع جميع الكورسات والشهادات المعتمدة.", None, 1),
-            ("lovable_pro_12m", "Lovable Pro Lite (12 شهر + 300C)", 2000.0, 8.5, "other", "⚡️ اشتراك لوفابل برو لمدة سنة لتطوير تطبيقات الويب بالذكاء الاصطناعي مع 300 رصيد شهري.", None, 1),
-            ("elevenlabs_creator_3m", "ElevenLabs Creator (3 أشهر)", 4500.0, 20.0, "other", "🎙 اشتراك إيلفن لابس كريتور لتوليد الأصوات بالذكاء الاصطناعي بدقة سينمائية (121k كريدت شهرياً).", None, 1),
-            ("claude_api_10m", "Claude API (10M Tokens)", 1000.0, 2.5, "other", "⚡️ رصيد 10 مليون توكن API لـ Claude 3.5 Sonnet / Opus للمطورين مع ضمان كامل.", 32, 1),
+            ("lovable_pro_12m", "Lovable Pro Lite (12 شهر + 300C)", 2000.0, 8.5, "lovable", "⚡️ اشتراك لوفابل برو لمدة سنة لتطوير تطبيقات الويب بالذكاء الاصطناعي مع 300 رصيد شهري.", None, 1),
+            ("elevenlabs_creator_3m", "ElevenLabs Creator (3 أشهر)", 4500.0, 20.0, "elevenlabs", "🎙 اشتراك إيلفن لابس كريتور لتوليد الأصوات بالذكاء الاصطناعي بدقة سينمائية (121k كريدت شهرياً).", None, 1),
+            ("claude_api_10m", "Claude API (10M Tokens)", 1000.0, 2.5, "claude", "⚡️ رصيد 10 مليون توكن API لـ Claude 3.5 Sonnet / Opus للمطورين مع ضمان كامل.", 32, 1),
             ("duolingo_12m", "Duolingo Super (12 شهر)", 600.0, 1.5, "other", "🦉 اشتراك دوولينجو سوبر لمدة سنة كاملة بدون إعلانات مع قلوب غير محدودة لتعلم اللغات.", 74, 1),
-            ("adobe_express_12m", "Adobe Express (12 شهر)", 500.0, 1.5, "other", "🎨 اشتراك أدوبي إكسبريس بريميوم لمدة سنة كاملة للتصميم وصناعة المحتوى مع آلاف القوالب.", None, 1),
-            ("adobe_express_4m", "Adobe Express (4 أشهر)", 400.0, 1.5, "other", "🎨 اشتراك أدوبي إكسبريس بريميوم لمدة 4 أشهر للتصميم وصناعة المحتوى مع آلاف القوالب.", None, 1),
+            ("adobe_express_12m", "Adobe Express (12 شهر)", 500.0, 1.5, "adobe", "🎨 اشتراك أدوبي إكسبريس بريميوم لمدة سنة كاملة للتصميم وصناعة المحتوى مع آلاف القوالب.", None, 1),
+            ("adobe_express_4m", "Adobe Express (4 أشهر)", 400.0, 1.5, "adobe", "🎨 اشتراك أدوبي إكسبريس بريميوم لمدة 4 أشهر للتصميم وصناعة المحتوى مع آلاف القوالب.", None, 1),
             ("apple_music_5m", "Apple Music (5 أشهر)", 500.0, 1.5, "other", "🎵 اشتراك أبل ميوزك أصلي لمدة 5 أشهر مع جودة صوت فائقة وبدون إعلانات.", None, 1),
-            ("capcut_pro_30d", "CapCut Pro (30 يوم)", 800.0, 2.5, "other", "🎬 اشتراك كاب كت برو لمدة شهر لمونتاج وتعديل الفيديوهات باحترافية وبدون علامة مائية.", 21, 1),
+            ("capcut_pro_30d", "CapCut Pro (30 يوم)", 800.0, 2.5, "capcut", "🎬 اشتراك كاب كت برو لمدة شهر لمونتاج وتعديل الفيديوهات باحترافية وبدون علامة مائية.", 21, 1),
         ]
 
         for p in initial_products:
@@ -225,26 +260,19 @@ async def get_all_products(only_active: bool = True) -> dict[str, dict]:
 
 
 async def get_products_by_category(category: str, only_active: bool = True) -> dict[str, dict]:
-    """Fetch products filtered by category ('gemini', 'chatgpt', 'other')"""
-    params = {"category": f"eq.{category}", "order": "price.desc"}
-    if only_active:
-        params["is_active"] = "eq.1"
-
-    sb_rows = await _sb_request("GET", "bot_products", params=params)
-    if sb_rows is not None:
-        result = {}
-        for r in sb_rows:
-            r["price"] = float(r["price"])
-            r["price_usd"] = float(r.get("price_usd") or 2.5)
-            result[r["id"]] = r
-        return result
-
-    # Local fallback
-    async with get_db() as db:
-        query = "SELECT * FROM products WHERE category = ? AND is_active = 1 ORDER BY price DESC" if only_active else "SELECT * FROM products WHERE category = ? ORDER BY price DESC"
-        cursor = await db.execute(query, (category,))
-        rows = await cursor.fetchall()
-        return {r["id"]: dict(r) for r in rows}
+    """Fetch products filtered by brand/category (matching DB category or brand keyword)"""
+    import supplier_api
+    all_prods = await get_all_products(only_active=only_active)
+    result = {}
+    for pid, p in all_prods.items():
+        p_cat = (p.get("category") or "other").lower()
+        detected = supplier_api.detect_product_category(pid, p.get("name", ""))
+        if category == "other":
+            if p_cat == "other" and detected == "other":
+                result[pid] = p
+        elif p_cat == category or detected == category:
+            result[pid] = p
+    return result
 
 
 async def get_product_by_id(product_id: str) -> dict | None:
@@ -274,6 +302,34 @@ async def update_product_price(product_id: str, new_price: float):
         await db.commit()
 
 
+async def update_product_price_usd(product_id: str, new_price_usd: float):
+    # Supabase Cloud update
+    await _sb_request("PATCH", "bot_products", params={"id": f"eq.{product_id}"}, json_data={"price_usd": new_price_usd})
+
+    # Local update
+    async with get_db() as db:
+        await db.execute("UPDATE products SET price_usd = ? WHERE id = ?", (new_price_usd, product_id))
+        await db.commit()
+
+
+async def update_product_instructions(product_id: str, new_instructions: str):
+    # Supabase Cloud update (both instructions and description so everything stays consistent)
+    await _sb_request(
+        "PATCH",
+        "bot_products",
+        params={"id": f"eq.{product_id}"},
+        json_data={"instructions": new_instructions, "description": new_instructions},
+    )
+
+    # Local update
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE products SET instructions = ?, description = ? WHERE id = ?",
+            (new_instructions, new_instructions, product_id),
+        )
+        await db.commit()
+
+
 async def add_new_product(
     product_id: str,
     name: str,
@@ -282,7 +338,12 @@ async def add_new_product(
     supplier_product_id: int | None = None,
     price_usd: float = 2.5,
     category: str = "other",
+    instructions: str = "",
 ):
+    if not category or category == "other":
+        import supplier_api
+        category = supplier_api.detect_product_category(product_id, name)
+    inst_val = instructions or description
     # Supabase Cloud insert
     payload = {
         "id": product_id,
@@ -291,6 +352,7 @@ async def add_new_product(
         "price_usd": price_usd,
         "category": category,
         "description": description,
+        "instructions": inst_val,
         "supplier_product_id": supplier_product_id,
         "is_active": 1,
     }
@@ -300,10 +362,10 @@ async def add_new_product(
     async with get_db() as db:
         await db.execute(
             """
-            INSERT OR REPLACE INTO products (id, name, price, price_usd, category, description, supplier_product_id, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+            INSERT OR REPLACE INTO products (id, name, price, price_usd, category, description, instructions, supplier_product_id, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
-            (product_id, name, price, price_usd, category, description, supplier_product_id),
+            (product_id, name, price, price_usd, category, description, inst_val, supplier_product_id),
         )
         await db.commit()
 
@@ -447,6 +509,63 @@ async def consume_stock_links(link_ids: list[int], order_id: int, user_id: int):
                 (order_id, user_id, now_iso, lid),
             )
         await db.commit()
+
+
+async def get_unused_links_for_product(product_id: str, limit: int = 30) -> list[dict]:
+    """Fetch unused links for a product (for viewing or deleting from stock)"""
+    sb_rows = await _sb_request(
+        "GET",
+        "bot_links_stock",
+        params={
+            "product_id": f"eq.{product_id}",
+            "is_used": "eq.false",
+            "order": "id.asc",
+            "limit": str(limit),
+        }
+    )
+    if sb_rows is not None and isinstance(sb_rows, list):
+        return sb_rows
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            """
+            SELECT id, product_id, link_url, added_at
+            FROM links_stock
+            WHERE product_id = ? AND is_used = 0
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (product_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def delete_stock_link(link_id: int, product_id: str | None = None) -> bool:
+    """Delete a specific unused link by ID from Supabase Cloud and local SQLite"""
+    await _sb_request("DELETE", "bot_links_stock", params={"id": f"eq.{link_id}"})
+    async with get_db() as db:
+        if product_id:
+            await db.execute("DELETE FROM links_stock WHERE id = ? AND product_id = ?", (link_id, product_id))
+        else:
+            await db.execute("DELETE FROM links_stock WHERE id = ?", (link_id,))
+        await db.commit()
+    return True
+
+
+async def clear_product_stock(product_id: str) -> int:
+    """Delete all unused links for a given product from Supabase Cloud and local SQLite"""
+    existing = await get_unused_links_for_product(product_id, limit=500)
+    count = len(existing)
+    await _sb_request(
+        "DELETE",
+        "bot_links_stock",
+        params={"product_id": f"eq.{product_id}", "is_used": "eq.false"},
+    )
+    async with get_db() as db:
+        await db.execute("DELETE FROM links_stock WHERE product_id = ? AND is_used = 0", (product_id,))
+        await db.commit()
+    return count
 
 
 # ==================== إدارة الطلبات (Orders) ====================
@@ -842,4 +961,303 @@ async def set_setting(key: str, value: str):
             (key, val_str),
         )
         await db.commit()
+
+
+# ==================== المحفظة وشحن الرصيد (Wallets & Top-Up) ====================
+
+async def get_user_wallet(user_id: int, user_name: str = "", user_username: str = "") -> dict:
+    """Fetch user's dual-currency wallet (DZD & USD), creating a 0-balance record if not exists"""
+    sb_rows = await _sb_request("GET", "bot_wallets", params={"user_id": f"eq.{user_id}", "limit": "1"})
+    if sb_rows is not None and isinstance(sb_rows, list) and sb_rows:
+        w = sb_rows[0]
+        w["balance_dzd"] = round(float(w.get("balance_dzd") or 0.0), 2)
+        w["balance_usd"] = round(float(w.get("balance_usd") or 0.0), 2)
+        return w
+
+    async with get_db() as db:
+        cur = await db.execute("SELECT * FROM wallets WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        if row:
+            w = dict(row)
+            w["balance_dzd"] = round(float(w.get("balance_dzd") or 0.0), 2)
+            w["balance_usd"] = round(float(w.get("balance_usd") or 0.0), 2)
+            return w
+
+    # Initialize empty wallet
+    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    init_wallet = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_username": user_username,
+        "balance_dzd": 0.0,
+        "balance_usd": 0.0,
+        "updated_at": now_iso,
+    }
+    await _sb_request("POST", "bot_wallets", json_data=init_wallet, prefer="resolution=merge-duplicates")
+    try:
+        async with get_db() as db:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO wallets (user_id, user_name, user_username, balance_dzd, balance_usd, updated_at)
+                VALUES (?, ?, ?, 0.0, 0.0, ?)
+                """,
+                (user_id, user_name, user_username, now_iso),
+            )
+            await db.commit()
+    except Exception:
+        pass
+    return init_wallet
+
+
+async def add_wallet_balance(
+    user_id: int,
+    amount_dzd: float = 0.0,
+    amount_usd: float = 0.0,
+    user_name: str = "",
+    user_username: str = "",
+) -> dict:
+    """Add (or deduct if negative) DZD and/or USD to user's wallet"""
+    curr = await get_user_wallet(user_id, user_name=user_name, user_username=user_username)
+    new_dzd = round(max(0.0, float(curr.get("balance_dzd") or 0.0) + float(amount_dzd)), 2)
+    new_usd = round(max(0.0, float(curr.get("balance_usd") or 0.0) + float(amount_usd)), 2)
+    uname = user_name or curr.get("user_name") or ""
+    uuser = user_username or curr.get("user_username") or ""
+    return await set_wallet_balance(user_id, new_dzd, new_usd, user_name=uname, user_username=uuser)
+
+
+async def set_wallet_balance(
+    user_id: int,
+    balance_dzd: float,
+    balance_usd: float,
+    user_name: str = "",
+    user_username: str = "",
+) -> dict:
+    """Explicitly set DZD and USD wallet balances"""
+    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    payload = {
+        "user_id": user_id,
+        "balance_dzd": round(float(balance_dzd), 2),
+        "balance_usd": round(float(balance_usd), 2),
+        "updated_at": now_iso,
+    }
+    if user_name:
+        payload["user_name"] = user_name
+    if user_username:
+        payload["user_username"] = user_username
+
+    await _sb_request("POST", "bot_wallets", json_data=payload, prefer="resolution=merge-duplicates")
+    try:
+        async with get_db() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO wallets (user_id, user_name, user_username, balance_dzd, balance_usd, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, user_name, user_username, payload["balance_dzd"], payload["balance_usd"], now_iso),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Local wallet update error: {e}")
+
+    return payload
+
+
+async def get_all_wallets(limit: int = 30) -> list[dict]:
+    sb_rows = await _sb_request(
+        "GET",
+        "bot_wallets",
+        params={"order": "updated_at.desc", "limit": str(limit)},
+    )
+    if sb_rows is not None and isinstance(sb_rows, list):
+        return sb_rows
+
+    async with get_db() as db:
+        cur = await db.execute("SELECT * FROM wallets ORDER BY updated_at DESC LIMIT ?", (limit,))
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def create_wallet_topup(
+    user_id: int,
+    user_name: str,
+    user_username: str,
+    amount: float,
+    currency: str = "دينار",
+    payment_method: str = "بريدي موب",
+    transfer_number: str = "",
+    receipt_file_id: str = "",
+) -> tuple[int, str]:
+    """Create a pending wallet top-up request in Supabase Cloud and local SQLite"""
+    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    payload = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "user_username": user_username,
+        "amount": float(amount),
+        "currency": currency,
+        "payment_method": payment_method,
+        "transfer_number": transfer_number,
+        "receipt_file_id": receipt_file_id,
+        "status": "PENDING",
+    }
+
+    sb_res = await _sb_request("POST", "bot_wallet_topups", json_data=payload, prefer="return=representation")
+    topup_id = None
+    if sb_res is not None and isinstance(sb_res, list) and sb_res:
+        topup_id = sb_res[0].get("id")
+        topup_code = f"TOP-{topup_id:04d}"
+        await _sb_request(
+            "PATCH",
+            "bot_wallet_topups",
+            params={"id": f"eq.{topup_id}"},
+            json_data={"topup_code": topup_code},
+        )
+
+    try:
+        async with get_db() as db:
+            if topup_id:
+                topup_code = f"TOP-{topup_id:04d}"
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO wallet_topups (
+                        id, topup_code, user_id, user_name, user_username, amount, currency,
+                        payment_method, transfer_number, receipt_file_id, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                    """,
+                    (
+                        topup_id, topup_code, user_id, user_name, user_username,
+                        float(amount), currency, payment_method, transfer_number,
+                        receipt_file_id, now_iso, now_iso,
+                    ),
+                )
+            else:
+                cur = await db.execute(
+                    """
+                    INSERT INTO wallet_topups (
+                        user_id, user_name, user_username, amount, currency,
+                        payment_method, transfer_number, receipt_file_id, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                    """,
+                    (
+                        user_id, user_name, user_username, float(amount), currency,
+                        payment_method, transfer_number, receipt_file_id, now_iso, now_iso,
+                    ),
+                )
+                topup_id = cur.lastrowid
+                topup_code = f"TOP-{topup_id:04d}"
+                await db.execute("UPDATE wallet_topups SET topup_code = ? WHERE id = ?", (topup_code, topup_id))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Local wallet_topups insert error: {e}")
+        if not topup_id:
+            topup_id = int(datetime.datetime.now().timestamp()) % 100000
+        topup_code = f"TOP-{topup_id:04d}"
+
+    return topup_id, topup_code
+
+
+async def get_topup_by_id(topup_id: int) -> dict | None:
+    sb_rows = await _sb_request("GET", "bot_wallet_topups", params={"id": f"eq.{topup_id}", "limit": "1"})
+    if sb_rows is not None and isinstance(sb_rows, list) and sb_rows:
+        return sb_rows[0]
+
+    async with get_db() as db:
+        cur = await db.execute("SELECT * FROM wallet_topups WHERE id = ?", (topup_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_pending_topups(limit: int = 20) -> list[dict]:
+    sb_rows = await _sb_request(
+        "GET",
+        "bot_wallet_topups",
+        params={"status": "eq.PENDING", "order": "id.desc", "limit": str(limit)},
+    )
+    if sb_rows is not None and isinstance(sb_rows, list):
+        return sb_rows
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM wallet_topups WHERE status = 'PENDING' ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_user_topups(user_id: int, limit: int = 10) -> list[dict]:
+    sb_rows = await _sb_request(
+        "GET",
+        "bot_wallet_topups",
+        params={"user_id": f"eq.{user_id}", "order": "id.desc", "limit": str(limit)},
+    )
+    if sb_rows is not None and isinstance(sb_rows, list):
+        return sb_rows
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM wallet_topups WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def approve_wallet_topup(topup_id: int, custom_amount: float | None = None) -> tuple[bool, dict | None, dict | None]:
+    """Approve a pending top-up and add the amount to the customer's DZD or USD balance"""
+    topup = await get_topup_by_id(topup_id)
+    if not topup or topup.get("status") != "PENDING":
+        return False, topup, None
+
+    final_amount = float(custom_amount) if custom_amount is not None else float(topup.get("amount", 0.0))
+    curr = str(topup.get("currency", "دينار"))
+    is_usd = "$" in curr or "usd" in curr.lower() or "دولار" in curr
+
+    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    await _sb_request(
+        "PATCH",
+        "bot_wallet_topups",
+        params={"id": f"eq.{topup_id}"},
+        json_data={"status": "APPROVED", "amount": final_amount, "updated_at": now_iso},
+    )
+    try:
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE wallet_topups SET status = 'APPROVED', amount = ?, updated_at = ? WHERE id = ?",
+                (final_amount, now_iso, topup_id),
+            )
+            await db.commit()
+    except Exception:
+        pass
+
+    updated_wallet = await add_wallet_balance(
+        user_id=int(topup["user_id"]),
+        amount_dzd=0.0 if is_usd else final_amount,
+        amount_usd=final_amount if is_usd else 0.0,
+        user_name=topup.get("user_name") or "",
+        user_username=topup.get("user_username") or "",
+    )
+    topup["amount"] = final_amount
+    topup["status"] = "APPROVED"
+    return True, topup, updated_wallet
+
+
+async def reject_wallet_topup(topup_id: int, reason: str = "") -> bool:
+    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    await _sb_request(
+        "PATCH",
+        "bot_wallet_topups",
+        params={"id": f"eq.{topup_id}"},
+        json_data={"status": "REJECTED", "reject_reason": reason, "updated_at": now_iso},
+    )
+    try:
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE wallet_topups SET status = 'REJECTED', reject_reason = ?, updated_at = ? WHERE id = ?",
+                (reason, now_iso, topup_id),
+            )
+            await db.commit()
+    except Exception:
+        pass
+    return True
 

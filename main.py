@@ -105,25 +105,41 @@ def main():
 
     # 0. Admin inline callbacks (highest priority so admin buttons always work)
     app.add_handler(CallbackQueryHandler(adm.admin_callback_dispatcher, pattern="^adm_"))
+    app.add_handler(CallbackQueryHandler(cust.noop_callback, pattern="^noop$"))
+    app.add_handler(CommandHandler("skip_reason", adm.handle_admin_text_input))
+    app.add_handler(CommandHandler("cancel_action", adm.handle_admin_text_input))
 
-    # Common inline callbacks for customer order flow
+    # Common inline callbacks for customer order & wallet flow
     common_order_callbacks = [
         CallbackQueryHandler(cust.category_selected_callback, pattern="^cat:"),
+        CallbackQueryHandler(cust.category_page_callback, pattern="^cat_page:"),
         CallbackQueryHandler(cust.back_to_categories_callback, pattern="^back_to_categories$"),
         CallbackQueryHandler(cust.back_to_products_callback, pattern="^back_to_prods:"),
         CallbackQueryHandler(cust.product_selected_callback, pattern="^prod:"),
+        CallbackQueryHandler(cust.product_instructions_callback, pattern="^prod_inst:"),
         CallbackQueryHandler(cust.quantity_selected_callback, pattern="^qty:"),
         CallbackQueryHandler(cust.payment_method_selected_callback, pattern="^paym:"),
+        CallbackQueryHandler(cust.confirm_wallet_pay_callback, pattern="^confirm_wallet_pay$"),
         CallbackQueryHandler(cust.proceed_to_upload_callback, pattern="^upload_receipt$"),
         CallbackQueryHandler(cust.change_payment_method_callback, pattern="^change_payment_method$"),
+        CallbackQueryHandler(cust.wallet_command, pattern="^wallet_menu$"),
+        CallbackQueryHandler(cust.wallet_history_callback, pattern="^wallet_history$"),
+        CallbackQueryHandler(cust.wallet_topup_curr_callback, pattern="^wallet_topup_curr:"),
+        CallbackQueryHandler(cust.wallet_amount_preset_callback, pattern="^wallet_amt:"),
+        CallbackQueryHandler(cust.wallet_paym_callback, pattern="^wallet_paym:"),
+        CallbackQueryHandler(cust.wallet_upload_proof_callback, pattern="^wallet_upload_proof$"),
         CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
     ]
 
-    # 1. Customer Order Conversation
+    menu_regex = r"(إلغاء|شراء اشتراك|محفظتي|Top Up|طلباتي|الدعم|التعليمات|لوحة تحكم الإدارة)"
+
+    # 1. Customer Order & Wallet Conversation
     order_conv_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex(r"شراء اشتراك"), cust.buy_subscription_entry),
+            MessageHandler(filters.Regex(r"محفظتي|Top Up"), cust.wallet_command),
             CommandHandler("buy", cust.buy_subscription_entry),
+            CommandHandler("wallet", cust.wallet_command),
             *common_order_callbacks,
         ],
         states={
@@ -138,10 +154,25 @@ def main():
             cust.AWAITING_TRANSFER_NO: [
                 *common_order_callbacks,
                 MessageHandler(
-                    filters.TEXT
-                    & ~filters.COMMAND
-                    & ~filters.Regex(r"(إلغاء|شراء اشتراك|طلباتي|الدعم|التعليمات|لوحة تحكم الإدارة)"),
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_regex),
                     cust.transfer_number_received,
+                ),
+                MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
+            ],
+            cust.AWAITING_TOPUP_AMOUNT: [
+                *common_order_callbacks,
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_regex),
+                    cust.wallet_amount_text_received,
+                ),
+                MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
+            ],
+            cust.AWAITING_TOPUP_PROOF: [
+                *common_order_callbacks,
+                MessageHandler(filters.PHOTO, cust.wallet_proof_received),
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_regex),
+                    cust.wallet_proof_received,
                 ),
                 MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
             ],
@@ -150,11 +181,13 @@ def main():
             CommandHandler("start", cust.start_command),
             CommandHandler("help", cust.help_command),
             CommandHandler("my_orders", cust.my_orders_command),
+            CommandHandler("wallet", cust.wallet_command),
             CommandHandler("admin", adm.admin_panel_command),
             CommandHandler("cancel", cust.cancel_order),
             CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
             MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
             MessageHandler(filters.Regex(r"شراء اشتراك"), cust.buy_subscription_entry),
+            MessageHandler(filters.Regex(r"محفظتي|Top Up"), cust.wallet_command),
             MessageHandler(filters.Regex(r"طلباتي"), cust.my_orders_command),
             MessageHandler(filters.Regex(r"الدعم|التعليمات"), cust.help_command),
             MessageHandler(filters.Regex(r"لوحة تحكم الإدارة"), adm.admin_panel_command),
@@ -169,22 +202,20 @@ def main():
     app.add_handler(CommandHandler("start", cust.start_command))
     app.add_handler(CommandHandler("help", cust.help_command))
     app.add_handler(CommandHandler("my_orders", cust.my_orders_command))
+    app.add_handler(CommandHandler("wallet", cust.wallet_command))
+    app.add_handler(MessageHandler(filters.Regex(r"محفظتي|Top Up"), cust.wallet_command))
     app.add_handler(MessageHandler(filters.Regex(r"طلباتي"), cust.my_orders_command))
     app.add_handler(MessageHandler(filters.Regex(r"الدعم|التعليمات"), cust.help_command))
 
     # 3. Admin Panel and Management
     app.add_handler(CommandHandler("admin", adm.admin_panel_command))
     app.add_handler(MessageHandler(filters.Regex(r"لوحة تحكم الإدارة"), adm.admin_panel_command))
-    
-    # Admin text handler (for manual links, reject reasons, stock additions, payment edits, custom messaging)
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_IDS),
             adm.handle_admin_text_input,
         )
     )
-    app.add_handler(CommandHandler("skip_reason", adm.handle_admin_text_input))
-    app.add_handler(CommandHandler("cancel_action", adm.handle_admin_text_input))
 
     # 4. Customer Support Inbound Handlers (outside active order flow)
     app.add_handler(

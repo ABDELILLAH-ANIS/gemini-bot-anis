@@ -584,14 +584,40 @@ def calculate_retail_prices(wholesale: float) -> tuple[float, float]:
     return retail_dzd, retail_usd
 
 
+BRAND_KEYWORDS: list[tuple[str, list[str]]] = [
+    ("gemini", ["gemini", "google ai", "جيميني"]),
+    ("claude", ["claude", "anthropic", "كلود"]),
+    ("chatgpt", ["chatgpt", "gpt", "codex", "openai", "جيبيتي"]),
+    ("kiro", ["kiro", "كيرو"]),
+    ("elevenlabs", ["elevenlabs", "elevenreader", "eleven labs"]),
+    ("cursor", ["cursor", "كيرسر"]),
+    ("adobe", ["adobe", "photoshop", "creative cloud", "أدوبي"]),
+    ("grok", ["grok", "xai", "غروك"]),
+    ("antigravity", ["antigravity"]),
+    ("perplexity", ["perplexity", "بيربليكسيتي"]),
+    ("lovable", ["lovable"]),
+    ("heygen", ["heygen"]),
+    ("capcut", ["capcut", "كاب كات"]),
+    ("notion", ["notion", "نوشن"]),
+    ("youtube", ["youtube", "يوتيوب"]),
+    ("runway", ["runway"]),
+    ("higgsfield", ["higgsfield"]),
+    ("telegram", ["telegram", "تليجرام", "تيليجرام"]),
+    ("canva", ["canva", "كانفا"]),
+    ("netflix", ["netflix", "نتفلكس", "نتفليكس"]),
+    ("kling", ["kling"]),
+    ("spotify", ["spotify", "سبوتيفاي"]),
+    ("suno", ["suno"]),
+    ("krea", ["krea"]),
+]
+
+
 def detect_product_category(slug: str, name: str) -> str:
     combined = f"{slug} {name}".lower()
-    if "gemini" in combined:
-        return "gemini"
-    elif any(k in combined for k in ["chatgpt", "gpt", "claude", "codex", "openai", "copilot"]):
-        return "chatgpt"
-    else:
-        return "other"
+    for brand_code, keywords in BRAND_KEYWORDS:
+        if any(k in combined for k in keywords):
+            return brand_code
+    return "other"
 
 
 async def load_dynamic_mappings_from_db():
