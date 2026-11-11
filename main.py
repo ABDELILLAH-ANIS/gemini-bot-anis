@@ -13,6 +13,12 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+from telegram import (
+    BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeChat,
+    MenuButtonCommands,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -36,8 +42,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def setup_bot_menu_commands(bot):
+    """Configure the corner Telegram Menu button with shortcut commands"""
+    user_commands = [
+        BotCommand("start", "🏠 القائمة الرئيسية وبداية البوت"),
+        BotCommand("products", "🛒 تصفح المنتجات والعلامات التجارية"),
+        BotCommand("wallet", "👛 محفظتي وشحن الرصيد (Top Up)"),
+        BotCommand("my_orders", "📦 طلباتي السابقة"),
+        BotCommand("help", "📘 الدعم والتعليمات"),
+        BotCommand("cancel", "❌ إلغاء العملية الحالية"),
+    ]
+    admin_commands = user_commands + [
+        BotCommand("admin", "⚙️ لوحة تحكم الإدارة"),
+    ]
+    try:
+        await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+            except Exception:
+                pass
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("Corner Menu button and bot commands configured successfully.")
+    except Exception as e:
+        logger.warning(f"Failed to set bot menu commands: {e}")
+
+
 async def post_init(application):
-    """Run database initialization and supplier mapping cache on startup"""
+    """Run database initialization, supplier mapping cache, and Menu button setup on startup"""
     logger.info("Initializing database...")
     await database.init_db()
     logger.info("Database initialized successfully.")
@@ -45,6 +77,8 @@ async def post_init(application):
     logger.info("Loading dynamic supplier mappings from database...")
     await supplier_api.load_dynamic_mappings_from_db()
     logger.info("Dynamic supplier mappings loaded successfully.")
+
+    await setup_bot_menu_commands(application.bot)
 
 
 async def periodic_supplier_sync_job(context: ContextTypes.DEFAULT_TYPE):
@@ -138,7 +172,7 @@ def main():
         entry_points=[
             MessageHandler(filters.Regex(r"شراء اشتراك"), cust.buy_subscription_entry),
             MessageHandler(filters.Regex(r"محفظتي|Top Up"), cust.wallet_command),
-            CommandHandler("buy", cust.buy_subscription_entry),
+            CommandHandler(["products", "buy"], cust.buy_subscription_entry),
             CommandHandler("wallet", cust.wallet_command),
             *common_order_callbacks,
         ],
@@ -179,6 +213,7 @@ def main():
         },
         fallbacks=[
             CommandHandler("start", cust.start_command),
+            CommandHandler(["products", "buy"], cust.buy_subscription_entry),
             CommandHandler("help", cust.help_command),
             CommandHandler("my_orders", cust.my_orders_command),
             CommandHandler("wallet", cust.wallet_command),
@@ -200,6 +235,7 @@ def main():
 
     # 2. General Customer Commands
     app.add_handler(CommandHandler("start", cust.start_command))
+    app.add_handler(CommandHandler(["products", "buy"], cust.buy_subscription_entry))
     app.add_handler(CommandHandler("help", cust.help_command))
     app.add_handler(CommandHandler("my_orders", cust.my_orders_command))
     app.add_handler(CommandHandler("wallet", cust.wallet_command))
