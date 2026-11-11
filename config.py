@@ -54,6 +54,11 @@ DIGITALCORE_PRODUCT_MAP = {
     "elevenlabs_creator_3m": "elevenlabs_creator_3_months",
 }
 
+# NevaKeyStore API Configuration (https://api.nevakeystore.shop)
+NEVA_BASE_URL = os.getenv("NEVA_BASE_URL", "https://api.nevakeystore.shop").rstrip("/")
+NEVA_API_KEY = os.getenv("NEVA_API_KEY", "Shop::VTQZlc6W-YPSPpVjvjUlhC6XapI").strip()
+NEVA_PRODUCT_MAP = {}
+
 # Database File Path (Local fallback cache)
 DB_PATH = os.path.join(os.path.dirname(__file__), "gemini_store.db")
 

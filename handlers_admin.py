@@ -1064,12 +1064,14 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
-    # Check Supplier Balance & Stock (DigitalCore, LahaStore, and AccZone in parallel)
+    # Check Supplier Balance & Stock (DigitalCore, NevaKeyStore, LahaStore, and AccZone in parallel)
     if data == "adm_supplier":
         await safe_answer(query, "🌐 جاري فحص أرصدة ومخزون الموردين...")
-        dc_bal, dc_stock, laha_bal, laha_stock, acc_bal, acc_stock = await asyncio.gather(
+        dc_bal, dc_stock, neva_bal, neva_stock, laha_bal, laha_stock, acc_bal, acc_stock = await asyncio.gather(
             supplier_api.check_digitalcore_balance(),
             supplier_api.get_digitalcore_stock(),
+            supplier_api.check_neva_balance(),
+            supplier_api.get_neva_all_products(),
             supplier_api.check_supplier_balance(),
             supplier_api.get_supplier_gemini_stock(),
             supplier_api.check_acczone_balance(),
@@ -1079,7 +1081,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         text = "🌐 **بيانات ورصيد مزودي الروابط (APIs):**\n─────────────────────\n\n"
 
         # DigitalCore Section
-        text += "🥇 **1. المورد الرئيسي (DigitalCore API):**\n"
+        text += "🥇 **1. المورد الأول (DigitalCore API):**\n"
         if dc_bal.get("ok"):
             text += (
                 f"• رصيد المحفظة: `{dc_bal.get('balance_text')}`\n"
@@ -1090,18 +1092,29 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
         if dc_stock.get("ok"):
             prods_dc = dc_stock.get("products", [])
-            for p in prods_dc[:7]:
-                p_name = escape_md(p.get("name", ""))
-                p_stock = p.get("stock", 0)
-                p_price = p.get("price", 0.0)
-                text += f"  - {p_name}: `{p_stock}` متوفر (${p_price})\n"
+            text += f"• المنتجات المتاحة: `{len(prods_dc)}` منتج\n"
+
+        text += "\n─────────────────────\n"
+
+        # NevaKeyStore Section
+        text += "🌟 **2. المورد الثاني (NevaKeyStore API):**\n"
+        if neva_bal.get("ok"):
+            text += (
+                f"• الحساب: `{escape_md(neva_bal.get('display_name'))}` (`{neva_bal.get('user_id')}`)\n"
+                f"• رصيد المحفظة: `{neva_bal.get('balance_text')}`\n"
+                f"• الطلبات المنفذة: `{neva_bal.get('api_orders')}` طلب\n"
+            )
         else:
-            text += "  - تعذر فحص مخزون DigitalCore.\n"
+            text += f"• حالة الحساب: ⚠️ {escape_md(neva_bal.get('error'))}\n"
+
+        if neva_stock.get("ok"):
+            prods_neva = neva_stock.get("products", [])
+            text += f"• إجمالي الباقات المربوطة: `{len(prods_neva)}` منتج نشط\n"
 
         text += "\n─────────────────────\n"
 
         # LahaStore Section
-        text += "🥈 **2. المورد الثاني (LahaStore API):**\n"
+        text += "🥈 **3. المورد الثالث (LahaStore API):**\n"
         if laha_bal.get("ok"):
             text += (
                 f"• معرف المتجر: `{laha_bal.get('shop_id')}`\n"
@@ -1110,17 +1123,10 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         else:
             text += f"• حالة الحساب: ⚠️ {escape_md(laha_bal.get('error'))}\n"
 
-        if laha_stock.get("ok"):
-            items = laha_stock.get("items", [])
-            for itm in items:
-                text += f"  - {escape_md(itm.get('name'))}: `{itm.get('stock')}` متوفر (${itm.get('priceUsd')})\n"
-        else:
-            text += "  - تعذر فحص مخزون LahaStore.\n"
-
         text += "\n─────────────────────\n"
 
         # AccZone Section
-        text += "🥉 **3. المورد الثالث (AccZone API):**\n"
+        text += "🥉 **4. المورد الرابع (AccZone API):**\n"
         if acc_bal.get("ok"):
             text += (
                 f"• المستخدم: `{escape_md(acc_bal.get('username'))}`\n"
@@ -1129,19 +1135,12 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         else:
             text += f"• حالة الحساب: ⚠️ {escape_md(acc_bal.get('error'))}\n"
 
-        if acc_stock.get("ok"):
-            items = acc_stock.get("items", [])
-            for itm in items:
-                text += f"  - {escape_md(itm.get('name'))}: `{itm.get('stock')}` متوفر (${itm.get('price')})\n"
-        else:
-            text += "  - تعذر فحص مخزون AccZone.\n"
-
         text += (
             "\n─────────────────────\n"
             "🔄 **نظام السحب والتسليم الذكي:**\n"
             "1. يبحث في المخزن السحابي المباشر أولاً.\n"
-            "2. إذا فرغ المخزن، يسحب تلقائياً وبأقل تكلفة من **DigitalCore**.\n"
-            "3. كبديل ثانٍ، يسحب تلقائياً من **AccZone** أو **LahaStore**.\n"
+            "2. إذا فرغ المخزن، يسحب تلقائياً من **DigitalCore** أو **NevaKeyStore**.\n"
+            "3. كبديل احتياطي، يسحب تلقائياً من **AccZone** أو **LahaStore**.\n"
             "4. إذا تعذرت جميع السيرفرات، يطلب منك إدخال الرابط يدوياً.\n"
         )
 
@@ -1159,6 +1158,7 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         loading_text = (
             "🔄 **جاري فحص الموردين ومزامنة المنتجات...**\n\n"
             "• فحص كتالوج DigitalCore API...\n"
+            "• فحص كتالوج NevaKeyStore API...\n"
             "• فحص كتالوج LahaStore API...\n"
             "• فحص خدمات AccZone API...\n"
             "يرجى الانتظار بضع ثوانٍ ⏳"
@@ -1168,12 +1168,14 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         new_items = await supplier_api.sync_new_supplier_products(bot=context.bot)
 
         # Live counts in parallel
-        dc_stock, laha_stock, acc_stock = await asyncio.gather(
+        dc_stock, neva_stock, laha_stock, acc_stock = await asyncio.gather(
             supplier_api.get_digitalcore_stock(),
+            supplier_api.get_neva_all_products(),
             supplier_api.get_lahastore_all_products(),
             supplier_api.get_acczone_all_services(),
         )
         dc_count = len(dc_stock.get("products", [])) if dc_stock.get("ok") else 0
+        neva_count = len(neva_stock.get("products", [])) if neva_stock.get("ok") else 0
         laha_count = len(laha_stock.get("products", [])) if laha_stock.get("ok") else 0
         acc_count = len(acc_stock.get("services", [])) if acc_stock.get("ok") else 0
 
@@ -1181,18 +1183,21 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
             "🎉 **اكتمل فحص ومزامنة منتجات الموردين بنجاح!**\n"
             "─────────────────────\n"
             f"🥇 **DigitalCore:** `{dc_count}` منتج نشط\n"
+            f"🌟 **NevaKeyStore:** `{neva_count}` منتج نشط\n"
             f"🥈 **LahaStore:** `{laha_count}` منتج نشط\n"
             f"🥉 **AccZone:** `{acc_count}` خدمات نشطة\n"
             "─────────────────────\n"
         )
         if new_items:
             res_text += f"🆕 **تم اكتشاف وإضافة `{len(new_items)}` منتج جديد للمتجر تلقائياً:**\n\n"
-            for itm in new_items:
+            for itm in new_items[:15]:
                 res_text += (
                     f"• **{escape_md(itm['name'])}** ({escape_md(itm['supplier'])})\n"
                     f"  سعر الجملة: `${itm['wholesale']}` | سعر البيع: `{itm['price_dzd']} دج` (${itm['price_usd']})\n"
                     f"  المخزون: `{itm['stock']}` قطعة | القسم: `{itm['category']}`\n\n"
                 )
+            if len(new_items) > 15:
+                res_text += f"➕ _و `{len(new_items) - 15}` منتج آخر تمت إضافتها لقاعدة البيانات..._\n\n"
             res_text += "💡 يمكنك تعديل الأسعار أو إيقاف أي منتج من 'إدارة المنتجات والأسعار'."
         else:
             res_text += "✅ **جميع المنتجات لدى الموردين مسجلة ومحدثة في قاعدة البيانات مسبقاً!**\nلا توجد منتجات جديدة غير مضافة حالياً."

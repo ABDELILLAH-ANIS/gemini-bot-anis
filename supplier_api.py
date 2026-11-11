@@ -7,6 +7,9 @@ from config import (
     DIGITALCORE_API_KEY,
     DIGITALCORE_BASE_URL,
     DIGITALCORE_PRODUCT_MAP,
+    NEVA_API_KEY,
+    NEVA_BASE_URL,
+    NEVA_PRODUCT_MAP,
     SUPPLIER_API_KEY,
     SUPPLIER_BASE_URL,
     SUPPLIER_PRODUCT_MAP,
@@ -343,6 +346,102 @@ async def purchase_from_acczone(
         return False, [], f"فشل الاتصال بـ AccZone: {str(e)}"
 
 
+# ==================== المورد الرابع (NevaKeyStore API) ====================
+
+async def check_neva_balance() -> dict:
+    """Check account balance and stats on NevaKeyStore (https://api.nevakeystore.shop)"""
+    if not NEVA_API_KEY:
+        return {"ok": False, "error": "لم يتم ضبط مفتاح NevaKeyStore API"}
+
+    url = f"{NEVA_BASE_URL}/v1/me"
+    headers = {"X-API-Key": NEVA_API_KEY, "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                bal = float(data.get("balance", 0.0))
+                return {
+                    "ok": True,
+                    "user_id": data.get("user_id"),
+                    "display_name": data.get("display_name", ""),
+                    "balance": bal,
+                    "balance_text": f"${bal:.2f}",
+                    "api_orders": data.get("api_orders", 0),
+                }
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def get_neva_all_products() -> dict:
+    """Fetch complete product catalog and stock from NevaKeyStore"""
+    if not NEVA_API_KEY:
+        return {"ok": False, "error": "لم يتم ضبط مفتاح NevaKeyStore API"}
+
+    url = f"{NEVA_BASE_URL}/v1/products"
+    headers = {"X-API-Key": NEVA_API_KEY, "Accept": "application/json"}
+    params = {"limit": 200, "include_note": True}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(url, headers=headers, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                products = data if isinstance(data, list) else data.get("products", [])
+                return {"ok": True, "products": products}
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def purchase_from_neva(
+    local_product_id: str,
+    quantity: int,
+    order_code: str,
+) -> tuple[bool, list[str], str]:
+    """Attempts to buy product via NevaKeyStore API (/v1/orders)"""
+    if not NEVA_API_KEY:
+        return False, [], "مفتاح NevaKeyStore API غير مضبوط."
+
+    neva_pid = NEVA_PRODUCT_MAP.get(local_product_id)
+    if not neva_pid:
+        return False, [], f"المنتج {local_product_id} غير مربوط بـ NevaKeyStore."
+
+    url = f"{NEVA_BASE_URL}/v1/orders"
+    headers = {
+        "X-API-Key": NEVA_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "product_id": neva_pid,
+        "qty": quantity,
+        "include_after_note": True,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "success" or data.get("order"):
+                    order_info = data.get("order", {})
+                    items = order_info.get("items", [])
+                    if items:
+                        oid = order_info.get("order_id", "")
+                        return True, items, f"تم شراء الرابط بنجاح من NevaKeyStore (طلب {oid})."
+                    return False, [], "تمت العملية في NevaKeyStore ولكن لم يتم إرجاع عناصر."
+                return False, [], f"NevaKeyStore: {data.get('detail') or data.get('message') or resp.text}"
+            else:
+                try:
+                    err_data = resp.json()
+                    msg = err_data.get("detail") or err_data.get("message") or resp.text
+                except Exception:
+                    msg = resp.text
+                return False, [], f"NevaKeyStore HTTP {resp.status_code}: {msg}"
+    except Exception as e:
+        return False, [], f"فشل الاتصال بـ NevaKeyStore: {str(e)}"
+
+
 # ==================== المولد التلقائي الذكي مع السحب البديل (Fallback Engine) ====================
 
 async def purchase_with_fallback(
@@ -351,32 +450,37 @@ async def purchase_with_fallback(
     order_code: str,
 ) -> tuple[bool, list[str], str, str]:
     """
-    Smart Multi-Supplier Routing (DigitalCore -> AccZone -> LahaStore):
-    1. Try DigitalCore first (huge stock, best wholesale prices, sub-millisecond execution).
-    2. Fallback to AccZone if supported.
-    3. Fallback to LahaStore if supported.
+    Smart Multi-Supplier Routing (DigitalCore -> NevaKeyStore -> AccZone -> LahaStore)
     """
     has_dc = local_product_id in DIGITALCORE_PRODUCT_MAP
+    has_neva = local_product_id in NEVA_PRODUCT_MAP
     has_acczone = local_product_id in ACCZONE_PRODUCT_MAP
     has_laha = local_product_id in SUPPLIER_PRODUCT_MAP
 
     errors = []
 
-    # 1. First priority: DigitalCore
+    # 1. DigitalCore
     if has_dc:
         dc_ok, dc_links, dc_msg = await purchase_from_digitalcore(local_product_id, quantity, order_code)
         if dc_ok and dc_links:
             return True, dc_links, dc_msg, "DigitalCore"
         errors.append(f"DigitalCore: {dc_msg}")
 
-    # 2. Second priority: AccZone
+    # 2. NevaKeyStore
+    if has_neva:
+        neva_ok, neva_links, neva_msg = await purchase_from_neva(local_product_id, quantity, order_code)
+        if neva_ok and neva_links:
+            return True, neva_links, neva_msg, "NevaKeyStore"
+        errors.append(f"NevaKeyStore: {neva_msg}")
+
+    # 3. AccZone
     if has_acczone:
         acc_ok, acc_links, acc_msg = await purchase_from_acczone(local_product_id, quantity)
         if acc_ok and acc_links:
             return True, acc_links, acc_msg, "AccZone"
         errors.append(f"AccZone: {acc_msg}")
 
-    # 3. Third priority: LahaStore
+    # 4. LahaStore
     if has_laha:
         laha_ok, laha_links, laha_msg = await purchase_from_supplier(local_product_id, quantity, order_code)
         if laha_ok and laha_links:
@@ -393,6 +497,7 @@ async def purchase_with_fallback(
 _STOCK_CACHE = {
     "last_fetch": 0.0,
     "digitalcore": {},  # slug -> int
+    "neva": {},         # product_id -> int
     "acczone": {},      # key -> int
     "lahastore": {},    # int(id) -> int
 }
@@ -405,11 +510,12 @@ async def refresh_all_supplier_stock_cache(force: bool = False) -> dict:
         return _STOCK_CACHE
 
     dc_task = get_digitalcore_stock()
+    neva_task = get_neva_all_products()
     acc_task = get_acczone_all_services()
     laha_task = get_lahastore_all_products()
 
-    results = await asyncio.gather(dc_task, acc_task, laha_task, return_exceptions=True)
-    dc_res, acc_res, laha_res = results
+    results = await asyncio.gather(dc_task, neva_task, acc_task, laha_task, return_exceptions=True)
+    dc_res, neva_res, acc_res, laha_res = results
 
     # 1. Parse DigitalCore Stock
     dc_stock_map = {}
@@ -423,7 +529,21 @@ async def refresh_all_supplier_stock_cache(force: bool = False) -> dict:
                 except Exception:
                     dc_stock_map[slug] = 0
 
-    # 2. Parse AccZone Stock
+    # 2. Parse NevaKeyStore Stock
+    neva_stock_map = {}
+    if isinstance(neva_res, dict) and neva_res.get("ok"):
+        for p in neva_res.get("products", []):
+            npid = p.get("product_id")
+            if npid:
+                if p.get("infinite_stock"):
+                    neva_stock_map[npid] = 999
+                else:
+                    try:
+                        neva_stock_map[npid] = int(p.get("stock_count") or 0)
+                    except Exception:
+                        neva_stock_map[npid] = 0
+
+    # 3. Parse AccZone Stock
     acc_stock_map = {}
     if isinstance(acc_res, dict) and acc_res.get("ok"):
         for s in acc_res.get("services", []):
@@ -435,7 +555,7 @@ async def refresh_all_supplier_stock_cache(force: bool = False) -> dict:
                 except Exception:
                     acc_stock_map[k] = 0
 
-    # 3. Parse LahaStore Stock
+    # 4. Parse LahaStore Stock
     laha_stock_map = {}
     if isinstance(laha_res, dict) and laha_res.get("ok"):
         for p in laha_res.get("products", []):
@@ -448,6 +568,7 @@ async def refresh_all_supplier_stock_cache(force: bool = False) -> dict:
                     laha_stock_map[int(pid)] = 0
 
     _STOCK_CACHE["digitalcore"] = dc_stock_map
+    _STOCK_CACHE["neva"] = neva_stock_map
     _STOCK_CACHE["acczone"] = acc_stock_map
     _STOCK_CACHE["lahastore"] = laha_stock_map
     _STOCK_CACHE["last_fetch"] = now
@@ -455,17 +576,7 @@ async def refresh_all_supplier_stock_cache(force: bool = False) -> dict:
 
 
 async def check_total_product_stock(local_product_id: str) -> dict:
-    """
-    Computes total available stock across local links and connected suppliers.
-    Returns:
-    {
-        "product_id": str,
-        "local_stock": int,
-        "api_stock": int,
-        "total_stock": int,
-        "is_in_stock": bool,
-    }
-    """
+    """Computes total available stock across local links and connected suppliers."""
     cache = await refresh_all_supplier_stock_cache()
 
     import database
@@ -473,17 +584,18 @@ async def check_total_product_stock(local_product_id: str) -> dict:
     local_stock = stock_counts.get(local_product_id, 0)
 
     api_stock = 0
-    # Check DigitalCore
     dc_slug = DIGITALCORE_PRODUCT_MAP.get(local_product_id)
     if dc_slug:
         api_stock += cache["digitalcore"].get(dc_slug, 0)
 
-    # Check AccZone
+    neva_pid = NEVA_PRODUCT_MAP.get(local_product_id)
+    if neva_pid:
+        api_stock += cache["neva"].get(neva_pid, 0)
+
     acc_key = ACCZONE_PRODUCT_MAP.get(local_product_id)
     if acc_key:
         api_stock += cache["acczone"].get(acc_key, 0)
 
-    # Check LahaStore
     laha_id = SUPPLIER_PRODUCT_MAP.get(local_product_id)
     if laha_id:
         try:
@@ -502,7 +614,7 @@ async def check_total_product_stock(local_product_id: str) -> dict:
 
 
 async def get_products_stock_summary(product_ids: list[str]) -> dict[str, bool]:
-    """Returns {product_id: is_in_stock} for a list of products (for menu badges)"""
+    """Returns {product_id: is_in_stock} for a list of products"""
     cache = await refresh_all_supplier_stock_cache()
     import database
     stock_counts = await database.get_stock_counts()
@@ -514,6 +626,9 @@ async def get_products_stock_summary(product_ids: list[str]) -> dict[str, bool]:
         dc_slug = DIGITALCORE_PRODUCT_MAP.get(pid)
         if dc_slug:
             api_stock += cache["digitalcore"].get(dc_slug, 0)
+        neva_pid = NEVA_PRODUCT_MAP.get(pid)
+        if neva_pid:
+            api_stock += cache["neva"].get(neva_pid, 0)
         acc_key = ACCZONE_PRODUCT_MAP.get(pid)
         if acc_key:
             api_stock += cache["acczone"].get(acc_key, 0)
@@ -585,7 +700,7 @@ def calculate_retail_prices(wholesale: float) -> tuple[float, float]:
 
 
 BRAND_KEYWORDS: list[tuple[str, list[str]]] = [
-    ("gemini", ["gemini", "google ai", "جيميني"]),
+    ("gemini", ["gemini", "google ai", "veo", "جيميني"]),
     ("claude", ["claude", "anthropic", "كلود"]),
     ("chatgpt", ["chatgpt", "gpt", "codex", "openai", "جيبيتي"]),
     ("kiro", ["kiro", "كيرو"]),
@@ -629,6 +744,11 @@ async def load_dynamic_mappings_from_db():
             data = json.loads(raw_dc)
             DIGITALCORE_PRODUCT_MAP.update(data)
 
+        raw_neva = await database.get_setting("dynamic_neva_map", "")
+        if raw_neva:
+            data = json.loads(raw_neva)
+            NEVA_PRODUCT_MAP.update(data)
+
         raw_lh = await database.get_setting("dynamic_laha_map", "")
         if raw_lh:
             data = json.loads(raw_lh)
@@ -647,6 +767,7 @@ async def save_dynamic_mappings_to_db():
     import database
     try:
         await database.set_setting("dynamic_dc_map", json.dumps(DIGITALCORE_PRODUCT_MAP))
+        await database.set_setting("dynamic_neva_map", json.dumps(NEVA_PRODUCT_MAP))
         await database.set_setting("dynamic_laha_map", json.dumps(SUPPLIER_PRODUCT_MAP))
         await database.set_setting("dynamic_acc_map", json.dumps(ACCZONE_PRODUCT_MAP))
     except Exception as e:
@@ -773,6 +894,67 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
                 "id": local_pid,
                 "name": clean_name,
                 "supplier": "LahaStore API",
+                "wholesale": wholesale,
+                "price_dzd": retail_dzd,
+                "price_usd": retail_usd,
+                "category": cat,
+                "stock": stk,
+            }
+            new_products_added.append(new_info)
+
+    # 3. Scan NevaKeyStore (https://api.nevakeystore.shop)
+    neva_res = await get_neva_all_products()
+    if neva_res.get("ok"):
+        neva_items = neva_res.get("products", [])
+        mapped_neva_ids = set(NEVA_PRODUCT_MAP.values())
+
+        for itm in neva_items:
+            npid = itm.get("product_id")
+            if not npid or npid in mapped_neva_ids:
+                continue
+            if itm.get("is_listed") is False:
+                continue
+
+            raw_name = itm.get("display_name") or itm.get("name") or npid
+            group_name = itm.get("group_name") or ""
+            wholesale = float(itm.get("price") or 0.0)
+            if wholesale <= 0:
+                continue
+
+            stk = 999 if itm.get("infinite_stock") else int(itm.get("stock_count") or 0)
+            clean_name = clean_supplier_title(raw_name)
+            retail_dzd, retail_usd = calculate_retail_prices(wholesale)
+            cat = detect_product_category(f"{npid} {group_name}", raw_name)
+
+            note_raw = (itm.get("note") or "").strip()
+            inst_text = note_raw if note_raw else f"اشتراك {clean_name} رسمي ومضمون طوال المدة المحددة."
+            desc_text = note_raw[:280] if note_raw else f"اشتراك {clean_name} رسمي ومضمون بضمان المتجر."
+
+            import re
+            clean_npid = re.sub(r"[^a-z0-9]+", "_", npid.strip().lower()).strip("_")
+            local_pid = f"nv_{clean_npid}"[:35]
+            if local_pid in existing_ids:
+                local_pid = f"nv_{clean_npid[:28]}_{len(existing_ids)}"
+
+            await database.add_new_product(
+                product_id=local_pid,
+                name=clean_name,
+                price=retail_dzd,
+                description=desc_text,
+                supplier_product_id=None,
+                price_usd=retail_usd,
+                category=cat,
+                instructions=inst_text,
+            )
+
+            NEVA_PRODUCT_MAP[local_pid] = npid
+            existing_ids.add(local_pid)
+            mapped_neva_ids.add(npid)
+
+            new_info = {
+                "id": local_pid,
+                "name": clean_name,
+                "supplier": "NevaKeyStore API",
                 "wholesale": wholesale,
                 "price_dzd": retail_dzd,
                 "price_usd": retail_usd,
