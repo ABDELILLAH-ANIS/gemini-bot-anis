@@ -342,8 +342,8 @@ async def product_selected_callback(update: Update, context: ContextTypes.DEFAUL
     text = (
         f"💎 **لقد اخترت:** {escape_md(product['name'])}\n"
         f"🇩🇿 **السعر بالدينار:** `{product['price']}` {CURRENCY}\n"
-        f"💵 **السعر بالدولار:** `${price_usd}`\n"
-        f"📝 **الوصف:** {escape_md(product.get('description', ''))}\n\n"
+        f"💵 **السعر بالدولار:** `${price_usd}`\n\n"
+        f"📝 **الوصف (Description):**\n{escape_md(product.get('description', ''))}\n\n"
         "🔢 **الرجاء تحديد الكمية المطلوبة (أو اضغط على زر تعليمات المنتج الأزرق):**"
     )
     await safe_edit_text(
@@ -373,7 +373,7 @@ async def product_instructions_callback(update: Update, context: ContextTypes.DE
     price_usd = product.get("price_usd", 2.5)
     inst_text = (product.get("instructions") or "").strip()
     if not inst_text:
-        inst_text = product.get("description") or "اشتراك رسمي مضمون. بعد الشراء ستصلك بيانات أو رابط التفعيل الفوري."
+        inst_text = product.get("description") or "Official subscription with full warranty and instant delivery."
 
     text = (
         f"🔵 📖 **تعليمات وشروط المنتج:**\n"

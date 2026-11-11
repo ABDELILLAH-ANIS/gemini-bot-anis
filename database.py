@@ -182,38 +182,32 @@ async def init_db():
         # Seed products locally
         initial_products = [
             # 1. Gemini
-            ("gemini_18m", "جيميني برو 18 شهر", 1100.0, 2.5, "gemini", "💎 اشتراك Google Gemini Pro أصلي لمدة 18 شهر بضمان كامل مع ميزات AI المتقدمة و2TB تخزين سحابي.", 14, 1),
-            ("gemini_12m", "جيميني برو 12 شهر", 1000.0, 2.5, "gemini", "💎 اشتراك Google Gemini Pro أصلي لمدة 12 شهر بضمان كامل مع ميزات AI المتقدمة و2TB تخزين سحابي.", 14, 1),
-            ("gemini_3m", "جيميني برو 3 أشهر", 500.0, 2.0, "gemini", "💎 اشتراك Google Gemini Pro أصلي لمدة 3 أشهر مع ميزات AI وسعة تخزين سحابية 5TB.", None, 1),
+            ("gemini_18m", "Gemini Pro 18 Months", 1100.0, 2.5, "gemini", "• Full Warranty for 18 months.\n• Includes Google AI Pro (Gemini Advanced) & 2TB Google One cloud storage.\n• Instant delivery with activation link/credentials.", 14, 1),
+            ("gemini_12m", "Gemini Pro 12 Months", 1000.0, 2.5, "gemini", "• Full Warranty for 12 months.\n• Includes Google AI Pro (Gemini Advanced) & 2TB Google One cloud storage.\n• Instant delivery with activation link/credentials.", 14, 1),
+            ("gemini_3m", "Gemini Pro 3 Months", 500.0, 2.0, "gemini", "• Valid only for new accounts without previous subscriptions or trials.\n• Requires connecting a valid payment method during activation.\n• Subscription includes 5 TB of cloud storage.\n• After activation, a family group can be created for up to 5 members.", None, 1),
 
             # 2. ChatGPT & Codex
-            ("chatgpt_plus_4m", "ChatGPT Plus (4 أشهر)", 6000.0, 25.0, "chatgpt", "🤖 اشتراك شات جي بي تي بلس الأصلي لمدة 4 أشهر كاملة مع ميزات GPT-4o وتوليد الصور المتقدمة.", 90, 1),
-            ("codex_api_10m", "Codex API (10M Tokens)", 1000.0, 2.5, "chatgpt", "💻 رصيد 10 مليون توكن API لـ OpenAI Codex للمطورين والمبرمجين مع ضمان كامل.", 36, 1),
+            ("chatgpt_plus_4m", "ChatGPT Plus 4 Months", 6000.0, 25.0, "chatgpt", "• Official ChatGPT Plus subscription for 4 months.\n• Full access to GPT-4o, reasoning models, image generation, and advanced voice mode.\n• Full warranty for the subscription period.", 90, 1),
+            ("codex_api_10m", "Codex API (10M Tokens)", 1000.0, 2.5, "chatgpt", "• 10 Million API Tokens for OpenAI Codex.\n• Ideal for developers and coding assistants with full warranty.", 36, 1),
 
             # 3. Other Brands & Digital Subscriptions
-            ("youtube_premium_3m", "YouTube Premium (3 أشهر)", 800.0, 3.5, "youtube", "🔴 اشتراك يوتيوب بريميوم رسمي لمدة 3 أشهر بدون إعلانات مع تشغيل بالخلفية وYouTube Music.", None, 1),
-            ("nordvpn_3m", "NordVPN Basic (3 أشهر)", 900.0, 4.0, "other", "🛡 اشتراك نورد في بي إن الأصلي لمدة 3 أشهر لحماية خصوصيتك وتصفح آمن على 10 أجهزة مع ضمان كامل.", None, 1),
-            ("coursera_12m", "Coursera Premium (12 شهر)", 800.0, 3.5, "other", "🎓 وصول بريميوم كامل لمنصة كورسيرا لمدة سنة مع جميع الكورسات والشهادات المعتمدة.", None, 1),
-            ("lovable_pro_12m", "Lovable Pro Lite (12 شهر + 300C)", 2000.0, 8.5, "lovable", "⚡️ اشتراك لوفابل برو لمدة سنة لتطوير تطبيقات الويب بالذكاء الاصطناعي مع 300 رصيد شهري.", None, 1),
-            ("elevenlabs_creator_3m", "ElevenLabs Creator (3 أشهر)", 4500.0, 20.0, "elevenlabs", "🎙 اشتراك إيلفن لابس كريتور لتوليد الأصوات بالذكاء الاصطناعي بدقة سينمائية (121k كريدت شهرياً).", None, 1),
-            ("claude_api_10m", "Claude API (10M Tokens)", 1000.0, 2.5, "claude", "⚡️ رصيد 10 مليون توكن API لـ Claude 3.5 Sonnet / Opus للمطورين مع ضمان كامل.", 32, 1),
-            ("duolingo_12m", "Duolingo Super (12 شهر)", 600.0, 1.5, "other", "🦉 اشتراك دوولينجو سوبر لمدة سنة كاملة بدون إعلانات مع قلوب غير محدودة لتعلم اللغات.", 74, 1),
-            ("adobe_express_12m", "Adobe Express (12 شهر)", 500.0, 1.5, "adobe", "🎨 اشتراك أدوبي إكسبريس بريميوم لمدة سنة كاملة للتصميم وصناعة المحتوى مع آلاف القوالب.", None, 1),
-            ("adobe_express_4m", "Adobe Express (4 أشهر)", 400.0, 1.5, "adobe", "🎨 اشتراك أدوبي إكسبريس بريميوم لمدة 4 أشهر للتصميم وصناعة المحتوى مع آلاف القوالب.", None, 1),
-            ("apple_music_5m", "Apple Music (5 أشهر)", 500.0, 1.5, "other", "🎵 اشتراك أبل ميوزك أصلي لمدة 5 أشهر مع جودة صوت فائقة وبدون إعلانات.", None, 1),
-            ("capcut_pro_30d", "CapCut Pro (30 يوم)", 800.0, 2.5, "capcut", "🎬 اشتراك كاب كت برو لمدة شهر لمونتاج وتعديل الفيديوهات باحترافية وبدون علامة مائية.", 21, 1),
+            ("youtube_premium_3m", "YouTube Premium 3 Months", 800.0, 3.5, "youtube", "• Valid only for new accounts without any previous YouTube Premium subscriptions or free trials.\n• Requires connecting a valid payment method during activation.\n• Ad-free videos, background play, and YouTube Music Premium included.", None, 1),
+            ("nordvpn_3m", "NordVPN 3 Months Basic", 900.0, 4.0, "other", "• Valid only for new accounts without any previous NordVPN subscriptions or trials.\n• Requires linking a valid payment method to activate.\n• Supports simultaneous use on up to 10 devices.\n• Full warranty after activation.", None, 1),
+            ("coursera_12m", "Coursera Premium 12 Months", 800.0, 3.5, "other", "• Can be activated on both new and existing accounts without an active subscription.\n• Activated via an invitation sent to the user's email address.\n• All certificates will be issued under the user's own name.\n• Full warranty after activation.", None, 1),
+            ("lovable_pro_12m", "Lovable Pro Lite 12 Months + 300 Credits", 2000.0, 8.5, "lovable", "• Can be activated on both new and existing accounts without an active subscription.\n• Includes the Pro Lite plan for 12 months.\n• Comes with 300 bonus credits.\n• Does not include monthly credit renewals.", None, 1),
+            ("elevenlabs_creator_3m", "ElevenLabs Creator 3 Months", 4500.0, 20.0, "elevenlabs", "• Valid only for new accounts without any previous ElevenLabs subscriptions or trials.\n• Requires linking a valid payment method to activate.\n• Includes 121k credits per month.\n• Full warranty after activation.", None, 1),
+            ("claude_api_10m", "Claude API (10M Tokens)", 1000.0, 2.5, "claude", "• 10 Million API Tokens for Anthropic Claude models.\n• Ready for developer integrations and coding tools with full warranty.", 32, 1),
+            ("duolingo_12m", "Duolingo Super 12 Months", 600.0, 1.5, "other", "• Valid only for new accounts without any previous Duolingo Super subscriptions or trials.\n• Requires linking a valid payment method to activate.\n• Ad-free learning, unlimited hearts, and personalized practice.", 74, 1),
+            ("adobe_express_12m", "Adobe Express Premium 12 Months", 500.0, 1.5, "adobe", "• Adobe Express Premium subscription for 12 months.\n• Full access to premium templates, Adobe Stock assets, and AI design features.", None, 1),
+            ("adobe_express_4m", "Adobe Express 4 Months Trial", 400.0, 1.5, "adobe", "• Valid only for new accounts without any previous Adobe subscriptions or free trials.\n• Requires connecting a valid payment method during activation.", None, 1),
+            ("apple_music_5m", "Apple Music 5 Months", 500.0, 1.5, "other", "• Official Apple Music subscription for 5 months.\n• Ad-free lossless audio streaming and offline listening.", None, 1),
+            ("capcut_pro_30d", "CapCut Pro 30 Days", 800.0, 2.5, "capcut", "• Official CapCut Pro subscription for 30 days.\n• Full access to pro video editing features, effects, and watermark-free exports.", 21, 1),
         ]
 
         for p in initial_products:
             await db.execute("""
-                INSERT INTO products (id, name, price, price_usd, category, description, supplier_product_id, is_active)
+                INSERT OR IGNORE INTO products (id, name, price, price_usd, category, description, supplier_product_id, is_active)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name=excluded.name,
-                    price_usd=excluded.price_usd,
-                    category=excluded.category,
-                    description=excluded.description,
-                    supplier_product_id=excluded.supplier_product_id
             """, p)
 
         await db.execute(

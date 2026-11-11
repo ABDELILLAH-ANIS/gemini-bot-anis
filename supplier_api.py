@@ -645,32 +645,31 @@ async def get_products_stock_summary(product_ids: list[str]) -> dict[str, bool]:
 # ==================== المزامنة التلقائية للمنتجات الجديدة (Auto-Discovery Engine) ====================
 
 def clean_supplier_title(raw_name: str) -> str:
-    """Translates common subscription terms and formats product title cleanly in Arabic / English"""
-    clean = raw_name.replace("_", " ").replace("-", " ").strip()
-    replacements = {
-        "18 Months": "(18 شهر)",
-        "18 months": "(18 شهر)",
-        "12 Months": "(12 شهر)",
-        "12 months": "(12 شهر)",
-        "12 Month": "(12 شهر)",
-        "6 Months": "(6 أشهر)",
-        "4 Months": "(4 أشهر)",
-        "3 Months": "(3 أشهر)",
-        "3 months": "(3 أشهر)",
-        "1 Month": "(شهر واحد)",
-        "1 month": "(شهر واحد)",
-        "30 Days": "(30 يوم)",
-        "30 days": "(30 يوم)",
-        "30D": "(30 يوم)",
-        "Full Warranty": "",
-        "Warranty 1 Day": "",
-        "Warranty 1 Days": "",
-    }
-    for k, v in replacements.items():
-        clean = clean.replace(k, v)
+    """Cleans HTML tags and extra whitespace while keeping the original English product title intact"""
+    if not raw_name:
+        return ""
+    import html as html_lib
     import re
-    clean = re.sub(r"\s+", " ", clean).strip(" -")
+    clean = re.sub(r"<[^>]+>", "", str(raw_name))
+    clean = html_lib.unescape(clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
     return clean
+
+
+def clean_supplier_description(raw_text: str) -> str:
+    """Strips HTML tags (like <tg-emoji>, <blockquote>, <b>) and unescapes entities while keeping the original English text and emojis intact"""
+    if not raw_text:
+        return ""
+    import html as html_lib
+    import re
+    text = re.sub(r"<br\s*/?>", "\n", str(raw_text), flags=re.IGNORECASE)
+    text = re.sub(r"</p>|</blockquote>|</div>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html_lib.unescape(text)
+    lines = [line.strip() for line in text.splitlines()]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
 
 
 def calculate_retail_prices(wholesale: float) -> tuple[float, float]:
@@ -804,9 +803,9 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
             clean_name = clean_supplier_title(raw_name)
             retail_dzd, retail_usd = calculate_retail_prices(wholesale)
             cat = detect_product_category(slug, raw_name)
-            desc = itm.get("description", "")
-            if not desc or len(desc) > 300:
-                desc = f"اشتراك {clean_name} أصلي بضمان كامل مع وصول فوري لكافة الميزات."
+            desc = clean_supplier_description(itm.get("description", ""))
+            if not desc:
+                desc = f"{clean_name} — Official subscription with full warranty and instant delivery."
 
             import re
             clean_slug = re.sub(r"[^a-z0-9]+", "_", slug.strip().lower()).strip("_")
@@ -822,6 +821,7 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
                 supplier_product_id=None,
                 price_usd=retail_usd,
                 category=cat,
+                instructions=desc,
             )
 
             DIGITALCORE_PRODUCT_MAP[local_pid] = slug
@@ -865,7 +865,9 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
             clean_name = clean_supplier_title(raw_name)
             retail_dzd, retail_usd = calculate_retail_prices(wholesale)
             cat = detect_product_category(str(lid), raw_name)
-            desc = f"اشتراك {clean_name} رسمي ومضمون طوال فترة الاشتراك."
+            desc = clean_supplier_description(itm.get("description") or "")
+            if not desc:
+                desc = f"{clean_name} — Official subscription with full warranty and instant delivery."
 
             import re
             slug_candidate = re.sub(r"[^a-z0-9]+", "_", clean_name.lower()).strip("_")
@@ -884,6 +886,7 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
                 supplier_product_id=int(lid),
                 price_usd=retail_usd,
                 category=cat,
+                instructions=desc,
             )
 
             SUPPLIER_PRODUCT_MAP[local_pid] = int(lid)
@@ -926,9 +929,11 @@ async def sync_new_supplier_products(bot=None) -> list[dict]:
             retail_dzd, retail_usd = calculate_retail_prices(wholesale)
             cat = detect_product_category(f"{npid} {group_name}", raw_name)
 
-            note_raw = (itm.get("note") or "").strip()
-            inst_text = note_raw if note_raw else f"اشتراك {clean_name} رسمي ومضمون طوال المدة المحددة."
-            desc_text = note_raw[:280] if note_raw else f"اشتراك {clean_name} رسمي ومضمون بضمان المتجر."
+            note_clean = clean_supplier_description(itm.get("note") or "")
+            if not note_clean:
+                note_clean = f"{clean_name} ({group_name}) — Official subscription with full warranty and instant delivery."
+            inst_text = note_clean
+            desc_text = note_clean
 
             import re
             clean_npid = re.sub(r"[^a-z0-9]+", "_", npid.strip().lower()).strip("_")
