@@ -12,10 +12,11 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from config import ADMIN_IDS, PRODUCTS, CURRENCY, SUPPLIER_SHOP_ID
+from config import ADMIN_IDS, PRODUCTS, CURRENCY, SUPPLIER_SHOP_ID, FORCE_JOIN_CHANNELS
 import database
 import keyboards
 import supplier_api
+import i18n
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ def has_active_admin_prompt(user_id: int, context: ContextTypes.DEFAULT_TYPE) ->
         "admin_edit_topup_",
         "admin_reject_topup_",
         "admin_manual_wallet_step_",
+        "admin_set_force_chat_url_",
     ):
         if context.bot_data.get(f"{key_prefix}{user_id}") is not None:
             return True
@@ -618,17 +620,17 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         curr = topup.get("currency", CURRENCY)
         cust_id = topup["user_id"]
 
-        # Notify Customer
-        cust_msg = (
-            f"🎉 **تمت الموافقة على شحن محفظتك بنجاح!**\n"
-            f"─────────────────────\n"
-            f"🔹 **رقم العملية:** `{tcode}`\n"
-            f"➕ **المبلغ المضاف:** `{amt}` {escape_md(curr)}\n\n"
-            f"👛 **رصيد محفظتك الحالي الآن:**\n"
-            f"• 🇩🇿 بالدينار: **`{new_wallet['balance_dzd']}` {CURRENCY}**\n"
-            f"• 💵 بالدولار: **`${new_wallet['balance_usd']:.2f}`**\n"
-            f"─────────────────────\n"
-            "يمكنك الآن شراء أي اشتراك فوراً باستخدام رصيد محفظتك! 🚀"
+        # Notify Customer in their chosen language
+        cust_lang = await database.get_user_language_or_default(cust_id, "ar")
+        cust_msg = i18n.t(
+            cust_lang,
+            "cust_topup_approved",
+            code=tcode,
+            amt=amt,
+            curr=escape_md(i18n.format_currency_value(curr, cust_lang)),
+            bal_dzd=new_wallet["balance_dzd"],
+            dzd_curr=i18n.currency_label(cust_lang),
+            bal_usd=f"{new_wallet['balance_usd']:.2f}",
         )
         await safe_send_message(context.bot, cust_id, cust_msg, parse_mode="Markdown")
 
@@ -1064,6 +1066,60 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
         )
         return
 
+    # Force-Join Required Channels Management
+    if data == "adm_force_join":
+        await safe_answer(query)
+        enabled = await database.is_force_join_enabled()
+        chat_url = await database.get_force_join_chat_url()
+        status_txt = "🟢 مفعّل (إلزامي قبل استخدام البوت وعرض المنتجات)" if enabled else "🔴 متوقف حالياً"
+        chan_lines = []
+        for ch in FORCE_JOIN_CHANNELS:
+            cid = ch["chat_id"]
+            u = (chat_url if ch["id"] == "main_chat" and chat_url else ch.get("url")) or "عبر زر المناقشة داخل القناة"
+            chan_lines.append(f"• {ch['title']['ar']}: `{cid}`\n  🔗 الرابط: `{u}`")
+        text = (
+            "🔒 **إدارة القنوات الإجبارية (Force Join):**\n"
+            "─────────────────────\n"
+            f"• **الحالة الحالية:** {status_txt}\n\n"
+            "📋 **القنوات المطلوبة:**\n"
+            + "\n".join(chan_lines)
+            + "\n\n💡 *ملاحظة:* تأكد من بقاء البوت داخل القناة والمجموعة حتى يتمكن من التحقق من اشتراك الأعضاء."
+        )
+        await safe_edit_text(
+            query.message,
+            text,
+            reply_markup=keyboards.get_admin_force_join_keyboard(enabled=enabled),
+            parse_mode="Markdown",
+        )
+        return
+
+    if data == "adm_toggle_force_join":
+        curr = await database.is_force_join_enabled()
+        new_val = not curr
+        await database.set_force_join_enabled(new_val)
+        await safe_answer(
+            query,
+            "🟢 تم تفعيل شرط الانضمام للقنوات!" if new_val else "🔴 تم إيقاف شرط الانضمام مؤقتاً.",
+            show_alert=True,
+        )
+        query.data = "adm_force_join"
+        return await admin_callback_dispatcher(update, context)
+
+    if data == "adm_set_force_chat_url":
+        await safe_answer(query)
+        context.bot_data[f"admin_set_force_chat_url_{user_id}"] = True
+        curr_url = await database.get_force_join_chat_url() or "غير مضبوط"
+        text = (
+            "🔗 **ضبط رابط دعوة مجموعة الشات (`ANISgoogle-bot chat`):**\n"
+            "─────────────────────\n"
+            f"• **الرابط الحالي:** `{curr_url}`\n\n"
+            "✍️ **أرسل الآن رابط الدعوة الخاص بالمجموعة (مثال: `https://t.me/+AbCdEfGhIjK`)**\n"
+            "أو أرسل `clear` لإزالة الرابط المخصص.\n\n"
+            "للإلغاء أرسل: `/cancel_action`"
+        )
+        await safe_edit_text(query.message, text, parse_mode="Markdown")
+        return
+
     # Check Supplier Balance & Stock (DigitalCore, NevaKeyStore, LahaStore, and AccZone in parallel)
     if data == "adm_supplier":
         await safe_answer(query, "🌐 جاري فحص أرصدة ومخزون الموردين...")
@@ -1296,16 +1352,14 @@ async def admin_callback_dispatcher(update: Update, context: ContextTypes.DEFAUL
 
         cust_user_id = order["user_id"]
         order_code = order["order_code"]
-        prod_name = escape_md(order["product_name"])
+        cust_lang = await database.get_user_language_or_default(cust_user_id, "ar")
+        tr_prod_name = await i18n.smart_translate_title(order["product_name"], cust_lang)
 
-        wait_msg = (
-            f"⏳ **مرحباً بك عزيزي العميل!**\n\n"
-            f"📌 بخصوص طلبك رقم: `{order_code}`\n"
-            f"📦 المنتج: **{prod_name}**\n\n"
-            f"🛠 **طلبك قيد التجهيز والتفعيل الآن من قبل إدارة المتجر.**\n"
-            f"نعمل حالياً على تجهيز وشراء اشتراكك لضمان أعلى جودة.\n"
-            f"يرجى الانتظار بضع دقائق وسيصلك رابط وبيانات التفعيل هنا فور الانتهاء مباشرة! 🚀\n\n"
-            f"شاكرين لصبرك وحسن تعاملك معنا! 🌟"
+        wait_msg = i18n.t(
+            cust_lang,
+            "cust_order_wait",
+            code=order_code,
+            name=escape_md(tr_prod_name),
         )
         try:
             await safe_send_message(
@@ -1557,15 +1611,16 @@ async def deliver_links_to_customer(
     order: dict,
     links: list[str],
 ):
-    """Sends the activation link(s) / credentials to the customer with instructions and posts channel proof"""
+    """Sends the activation link(s) / credentials to the customer in their chosen language and posts channel proof"""
     user_id = order["user_id"]
-    product_name = order.get("product_name", "الاشتراك")
+    cust_lang = await database.get_user_language_or_default(user_id, "ar")
+    product_name = order.get("product_name", "Subscription")
     prod_id = order.get("product_id", "")
 
     items_formatted = ""
     for idx, l in enumerate(links, 1):
         is_url = l.startswith("http://") or l.startswith("https://")
-        header = f"🔗 **رابط التفعيل #{idx}:**" if is_url else f"🔑 **بيانات / كود التفعيل #{idx}:**"
+        header = i18n.t(cust_lang, "cust_link_header" if is_url else "cust_code_header", idx=idx)
         clean_l = l.replace("`", "")
         items_formatted += f"{header}\n`{clean_l}`\n\n"
 
@@ -1573,32 +1628,22 @@ async def deliver_links_to_customer(
     prod_record = await database.get_product_by_id(prod_id) if prod_id else None
     custom_inst = (prod_record.get("instructions") or "").strip() if prod_record else ""
     if custom_inst:
-        instructions = f"📘 **تعليمات وشروط التفعيل:**\n{escape_md(custom_inst)}\n\n"
+        tr_inst = await i18n.smart_translate(custom_inst, cust_lang)
+        instructions = i18n.t(cust_lang, "cust_custom_inst_header", inst=escape_md(tr_inst))
     elif "gemini" in prod_id.lower() or "gemini" in product_name.lower():
-        instructions = (
-            "🌟 **طريقة التفعيل:**\n"
-            "1. قم بفتح رابط التفعيل في المتصفح.\n"
-            "2. سجل الدخول بحساب Google الذي تريد تفعيل اشتراك Gemini Pro عليه.\n"
-            "3. اضغط على تأكيد/قبول التفعيل ومبروك عليك الاشتراك! 🚀\n\n"
-        )
+        instructions = i18n.t(cust_lang, "cust_gemini_inst")
     else:
-        instructions = (
-            "🌟 **طريقة التفعيل / الاستخدام:**\n"
-            "1. استخدم الرابط أو بيانات الحساب/الكود المرفقة أعلاه لتسجيل الدخول والتفعيل.\n"
-            "2. الاشتراك أصلي ومضمون طوال المدة المحددة بضمان المتجر.\n"
-            "3. إذا احتجت أي مساعدة بالتفعيل يمكنك مراسلتنا هنا مباشرة وسنساعدك فوراً! 🚀\n\n"
-        )
+        instructions = i18n.t(cust_lang, "cust_generic_inst")
 
-    customer_msg = (
-        f"🎉 **مبروك! تم تأكيد وقبول عملية الدفع لطلبك بنجاح!**\n"
-        f"─────────────────────\n"
-        f"🔹 **رقم الطلب:** `{order['order_code']}`\n"
-        f"📦 **المنتج:** {escape_md(product_name)}\n"
-        f"🔢 **الكمية:** {order['quantity']}\n"
-        f"─────────────────────\n\n"
-        f"{items_formatted}"
-        f"{instructions}"
-        "شكراً لثقتك بنا ونتمنى لك تجربة ممتعة! 🌟"
+    tr_prod_name = await i18n.smart_translate_title(product_name, cust_lang)
+    customer_msg = i18n.t(
+        cust_lang,
+        "cust_delivery_msg",
+        code=order["order_code"],
+        name=escape_md(tr_prod_name),
+        qty=order["quantity"],
+        items=items_formatted,
+        instructions=instructions,
     )
 
     try:
@@ -1645,6 +1690,7 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             "admin_edit_topup_",
             "admin_reject_topup_",
             "admin_manual_wallet_step_",
+            "admin_set_force_chat_url_",
         ):
             context.bot_data.pop(f"{key_prefix}{user_id}", None)
         await update.message.reply_text("✅ تم إلغاء العملية الحالية.")
@@ -1661,12 +1707,9 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
 
         cust_uid = order["user_id"]
         order_code = order["order_code"]
-        cust_msg = (
-            f"📩 **رسالة من إدارة المتجر بخصوص طلبك `{order_code}`:**\n\n"
-            f"{escape_md(text)}\n\n"
-            f"─────────────────\n"
-            f"💬 يمكنك الرد مباشرة على هذه الرسالة إذا طُلب منك أي معلومات أو استفسار."
-        )
+        cust_lang = await database.get_user_language_or_default(cust_uid, "ar")
+        tr_msg = await i18n.smart_translate(text, cust_lang)
+        cust_msg = i18n.t(cust_lang, "cust_admin_msg_order", code=order_code, msg=escape_md(tr_msg))
         try:
             await safe_send_message(
                 context.bot,
@@ -1688,12 +1731,9 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
     # 0.1 Awaiting Direct Message to a Customer User ID
     reply_target_uid = context.bot_data.get(f"admin_reply_user_{user_id}")
     if reply_target_uid:
-        cust_msg = (
-            f"📩 **رسالة من إدارة المتجر:**\n\n"
-            f"{escape_md(text)}\n\n"
-            f"─────────────────\n"
-            f"💬 يمكنك الرد مباشرة على هذه الرسالة."
-        )
+        cust_lang = await database.get_user_language_or_default(reply_target_uid, "ar")
+        tr_msg = await i18n.smart_translate(text, cust_lang)
+        cust_msg = i18n.t(cust_lang, "cust_admin_msg_direct", prefix="", msg=escape_md(tr_msg))
         try:
             await safe_send_message(
                 context.bot,
@@ -1729,13 +1769,10 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             target_order_code = m_order.group(1)
 
         if target_uid and target_uid not in ADMIN_IDS:
-            prefix = f" بخصوص طلبك `{target_order_code}`" if target_order_code else ""
-            cust_msg = (
-                f"📩 **رسالة من إدارة المتجر{prefix}:**\n\n"
-                f"{escape_md(text)}\n\n"
-                f"─────────────────\n"
-                f"💬 يمكنك الرد مباشرة على هذه الرسالة."
-            )
+            cust_lang = await database.get_user_language_or_default(target_uid, "ar")
+            tr_msg = await i18n.smart_translate(text, cust_lang)
+            prefix = i18n.t(cust_lang, "cust_admin_order_prefix", code=target_order_code) if target_order_code else ""
+            cust_msg = i18n.t(cust_lang, "cust_admin_msg_direct", prefix=prefix, msg=escape_md(tr_msg))
             try:
                 await safe_send_message(
                     context.bot,
@@ -1838,17 +1875,17 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
         tcode = topup.get("topup_code") or f"TOP-{edit_topup_id:04d}"
         curr = topup.get("currency", CURRENCY)
         cust_id = topup["user_id"]
+        cust_lang = await database.get_user_language_or_default(cust_id, "ar")
 
-        cust_msg = (
-            f"🎉 **تمت الموافقة على شحن محفظتك بنجاح!**\n"
-            f"─────────────────────\n"
-            f"🔹 **رقم العملية:** `{tcode}`\n"
-            f"➕ **المبلغ المضاف:** `{custom_amt}` {escape_md(curr)}\n\n"
-            f"👛 **رصيد محفظتك الحالي الآن:**\n"
-            f"• 🇩🇿 بالدينار: **`{new_wallet['balance_dzd']}` {CURRENCY}**\n"
-            f"• 💵 بالدولار: **`${new_wallet['balance_usd']:.2f}`**\n"
-            f"─────────────────────\n"
-            "يمكنك الآن شراء أي اشتراك فوراً باستخدام رصيد محفظتك! 🚀"
+        cust_msg = i18n.t(
+            cust_lang,
+            "cust_topup_approved",
+            code=tcode,
+            amt=custom_amt,
+            curr=escape_md(i18n.format_currency_value(curr, cust_lang)),
+            bal_dzd=new_wallet["balance_dzd"],
+            dzd_curr=i18n.currency_label(cust_lang),
+            bal_usd=f"{new_wallet['balance_usd']:.2f}",
         )
         await safe_send_message(context.bot, cust_id, cust_msg, parse_mode="Markdown")
         await safe_reply_text(
@@ -1869,10 +1906,13 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
 
         if topup:
             tcode = topup.get("topup_code") or f"TOP-{reject_topup_id:04d}"
-            cust_msg = (
-                f"❌ **نعتذر منك، تم رفض طلب شحن المحفظة `{tcode}`.**\n\n"
-                f"⚠️ **السبب:** {escape_md(reason)}\n\n"
-                "يرجى التأكد من إشعار التحويل أو التواصل معنا للمساعدة."
+            cust_lang = await database.get_user_language_or_default(topup["user_id"], "ar")
+            tr_reason = await i18n.smart_translate(reason, cust_lang)
+            cust_msg = i18n.t(
+                cust_lang,
+                "cust_topup_rejected",
+                code=tcode,
+                reason=escape_md(tr_reason),
             )
             await safe_send_message(context.bot, topup["user_id"], cust_msg, parse_mode="Markdown")
 
@@ -1923,12 +1963,20 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             curr_str = "$" if is_usd else CURRENCY
 
             if delta > 0:
+                cust_lang = await database.get_user_language_or_default(target_uid, "ar")
+                disp_curr = "$" if is_usd else i18n.currency_label(cust_lang)
                 await safe_send_message(
                     context.bot,
                     target_uid,
-                    f"🎉 **تمت إضافة رصيد إلى محفظتك من قِبل الإدارة!**\n\n"
-                    f"➕ **المبلغ المضاف:** `{delta}` {curr_str}\n"
-                    f"👛 **رصيد محفظتك الآن:** `{new_w['balance_dzd']}` {CURRENCY} | `${new_w['balance_usd']:.2f}`",
+                    i18n.t(
+                        cust_lang,
+                        "cust_manual_wallet_credit",
+                        amt=delta,
+                        curr=disp_curr,
+                        bal_dzd=new_w["balance_dzd"],
+                        dzd_curr=i18n.currency_label(cust_lang),
+                        bal_usd=f"{new_w['balance_usd']:.2f}",
+                    ),
                     parse_mode="Markdown",
                 )
 
@@ -2036,10 +2084,13 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
 
         if order:
             await database.mark_order_rejected(reject_order_id, reason)
-            cust_text = (
-                f"❌ **نعتذر منك، تم رفض طلبك رقم `{order['order_code']}`.**\n\n"
-                f"⚠️ **السبب:** {escape_md(reason)}\n\n"
-                "إذا كنت ترى أن هناك خطأ أو ترغب في إعادة المحاولة، يرجى مراجعة إشعار التحويل أو التواصل معنا."
+            cust_lang = await database.get_user_language_or_default(order["user_id"], "ar")
+            tr_reason = await i18n.smart_translate(reason, cust_lang)
+            cust_text = i18n.t(
+                cust_lang,
+                "cust_order_rejected",
+                code=order["order_code"],
+                reason=escape_md(tr_reason),
             )
             try:
                 await safe_send_message(
@@ -2130,6 +2181,34 @@ async def handle_admin_text_input(update: Update, context: ContextTypes.DEFAULT_
             f"✅ **تم ضبط قناة إثباتات المبيعات بنجاح!**\n"
             f"القناة: `{clean_chan}`{title_info}\n\n"
             "اضغط الآن على **'🧪 إرسال منشور تجريبي للقناة'** من لوحة التحكم للتأكد من وصول الرسائل! 🚀",
+            parse_mode="Markdown",
+        )
+        return
+
+    # 7.5 Editing Force-Join Chat Invite URL
+    if context.bot_data.get(f"admin_set_force_chat_url_{user_id}"):
+        raw_url = text.strip()
+        if raw_url.lower() == "clear":
+            await database.set_force_join_chat_url("")
+            context.bot_data.pop(f"admin_set_force_chat_url_{user_id}", None)
+            await safe_reply_text(
+                update.message,
+                "✅ **تم مسح رابط الدعوة المخصص لمجموعة الشات بنجاح.**",
+                parse_mode="Markdown",
+            )
+            return
+
+        if not (raw_url.startswith("http://") or raw_url.startswith("https://") or raw_url.startswith("t.me/")):
+            await update.message.reply_text("⚠️ يرجى إرسال رابط دعوة تليجرام صحيح يبدأ بـ `https://t.me/...` (أو `/cancel_action` للإلغاء).")
+            return
+        if raw_url.startswith("t.me/"):
+            raw_url = f"https://{raw_url}"
+
+        await database.set_force_join_chat_url(raw_url)
+        context.bot_data.pop(f"admin_set_force_chat_url_{user_id}", None)
+        await safe_reply_text(
+            update.message,
+            f"✅ **تم حفظ رابط دعوة الشات الإجباري بنجاح!**\n🔗 الرابط: `{raw_url}`",
             parse_mode="Markdown",
         )
         return

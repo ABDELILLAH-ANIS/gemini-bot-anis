@@ -179,6 +179,16 @@ async def init_db():
             );
         """)
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS translation_cache (
+                cache_key TEXT PRIMARY KEY,
+                target_lang TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                translated_text TEXT NOT NULL,
+                updated_at TEXT
+            );
+        """)
+
         # Seed products locally
         initial_products = [
             # 1. Gemini
@@ -955,6 +965,107 @@ async def set_setting(key: str, value: str):
             (key, val_str),
         )
         await db.commit()
+
+
+# ==================== اللغة والترجمة والقنوات الإجبارية (Language, Translation Cache & Force-Join) ====================
+
+_USER_LANG_CACHE: dict[int, str] = {}
+
+
+async def get_user_language(user_id: int) -> str | None:
+    """Return user's saved language ('ar', 'en', 'fr') or None if not selected yet."""
+    if user_id in _USER_LANG_CACHE:
+        return _USER_LANG_CACHE[user_id]
+
+    key = f"user_lang_{user_id}"
+    # Check local SQLite first for speed
+    try:
+        async with get_db() as db:
+            cur = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = await cur.fetchone()
+            if row and row["value"] in ("ar", "en", "fr"):
+                _USER_LANG_CACHE[user_id] = row["value"]
+                return row["value"]
+    except Exception:
+        pass
+
+    # Fallback to Supabase Cloud (survives redeploys)
+    sb_row = await _sb_request("GET", "bot_settings", params={"key": f"eq.{key}", "select": "value", "limit": 1})
+    if sb_row is not None and isinstance(sb_row, list) and sb_row:
+        val = str(sb_row[0].get("value") or "").strip().lower()
+        if val in ("ar", "en", "fr"):
+            _USER_LANG_CACHE[user_id] = val
+            try:
+                async with get_db() as db:
+                    await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, val))
+                    await db.commit()
+            except Exception:
+                pass
+            return val
+
+    return None
+
+
+async def get_user_language_or_default(user_id: int, default: str = "ar") -> str:
+    lang = await get_user_language(user_id)
+    return lang if lang in ("ar", "en", "fr") else default
+
+
+async def set_user_language(user_id: int, lang: str):
+    """Persist user's chosen language in memory, local SQLite, and Supabase Cloud."""
+    clean = (lang or "ar").strip().lower()
+    if clean not in ("ar", "en", "fr"):
+        clean = "ar"
+    _USER_LANG_CACHE[user_id] = clean
+    await set_setting(f"user_lang_{user_id}", clean)
+
+
+async def get_cached_translation(cache_key: str) -> str | None:
+    try:
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT translated_text FROM translation_cache WHERE cache_key = ?",
+                (cache_key,),
+            )
+            row = await cur.fetchone()
+            if row and row["translated_text"]:
+                return str(row["translated_text"])
+    except Exception:
+        pass
+    return None
+
+
+async def save_cached_translation(cache_key: str, target_lang: str, source_hash: str, translated_text: str):
+    now_iso = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        async with get_db() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO translation_cache (cache_key, target_lang, source_hash, translated_text, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (cache_key, target_lang, source_hash, translated_text, now_iso),
+            )
+            await db.commit()
+    except Exception as e:
+        logger.debug(f"Translation cache write error: {e}")
+
+
+async def is_force_join_enabled() -> bool:
+    val = await get_setting("force_join_enabled", "1")
+    return str(val).strip() != "0"
+
+
+async def set_force_join_enabled(enabled: bool):
+    await set_setting("force_join_enabled", "1" if enabled else "0")
+
+
+async def get_force_join_chat_url() -> str:
+    return (await get_setting("force_join_chat_url", "")).strip()
+
+
+async def set_force_join_chat_url(url: str):
+    await set_setting("force_join_chat_url", url.strip())
 
 
 # ==================== المحفظة وشحن الرصيد (Wallets & Top-Up) ====================

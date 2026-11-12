@@ -43,27 +43,53 @@ logger = logging.getLogger(__name__)
 
 
 async def setup_bot_menu_commands(bot):
-    """Configure the corner Telegram Menu button with shortcut commands"""
-    user_commands = [
-        BotCommand("start", "🏠 القائمة الرئيسية وبداية البوت"),
-        BotCommand("products", "🛒 تصفح المنتجات والعلامات التجارية"),
-        BotCommand("wallet", "👛 محفظتي وشحن الرصيد (Top Up)"),
-        BotCommand("my_orders", "📦 طلباتي السابقة"),
-        BotCommand("help", "📘 الدعم والتعليمات"),
-        BotCommand("cancel", "❌ إلغاء العملية الحالية"),
-    ]
-    admin_commands = user_commands + [
+    """Configure the corner Telegram Menu button with localized shortcut commands (AR / EN / FR)"""
+    commands_by_lang = {
+        "ar": [
+            BotCommand("start", "🏠 القائمة الرئيسية وبداية البوت"),
+            BotCommand("products", "🛒 تصفح المنتجات والعلامات التجارية"),
+            BotCommand("wallet", "👛 محفظتي وشحن الرصيد (Top Up)"),
+            BotCommand("my_orders", "📦 طلباتي السابقة"),
+            BotCommand("lang", "🌐 تغيير اللغة (AR / EN / FR)"),
+            BotCommand("help", "📘 الدعم والتعليمات"),
+            BotCommand("cancel", "❌ إلغاء العملية الحالية"),
+        ],
+        "en": [
+            BotCommand("start", "🏠 Main Menu & Start"),
+            BotCommand("products", "🛒 Browse Products & Brands"),
+            BotCommand("wallet", "👛 My Wallet & Top Up"),
+            BotCommand("my_orders", "📦 My Orders"),
+            BotCommand("lang", "🌐 Change Language (AR / EN / FR)"),
+            BotCommand("help", "📘 Support & Info"),
+            BotCommand("cancel", "❌ Cancel Current Action"),
+        ],
+        "fr": [
+            BotCommand("start", "🏠 Menu Principal"),
+            BotCommand("products", "🛒 Parcourir les produits"),
+            BotCommand("wallet", "👛 Mon Portefeuille (Top Up)"),
+            BotCommand("my_orders", "📦 Mes Commandes"),
+            BotCommand("lang", "🌐 Changer de langue (AR / EN / FR)"),
+            BotCommand("help", "📘 Support & Aide"),
+            BotCommand("cancel", "❌ Annuler l'opération"),
+        ],
+    }
+    admin_commands = commands_by_lang["ar"] + [
         BotCommand("admin", "⚙️ لوحة تحكم الإدارة"),
     ]
     try:
-        await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+        await bot.set_my_commands(commands_by_lang["ar"], scope=BotCommandScopeDefault())
+        for lc, cmds in commands_by_lang.items():
+            try:
+                await bot.set_my_commands(cmds, scope=BotCommandScopeDefault(), language_code=lc)
+            except Exception:
+                pass
         for admin_id in ADMIN_IDS:
             try:
                 await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
             except Exception:
                 pass
         await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-        logger.info("Corner Menu button and bot commands configured successfully.")
+        logger.info("Corner Menu button and localized bot commands configured successfully.")
     except Exception as e:
         logger.warning(f"Failed to set bot menu commands: {e}")
 
@@ -140,6 +166,9 @@ def main():
     # 0. Admin inline callbacks (highest priority so admin buttons always work)
     app.add_handler(CallbackQueryHandler(adm.admin_callback_dispatcher, pattern="^adm_"))
     app.add_handler(CallbackQueryHandler(cust.noop_callback, pattern="^noop$"))
+    app.add_handler(CallbackQueryHandler(cust.language_selected_callback, pattern="^lang:"))
+    app.add_handler(CallbackQueryHandler(cust.language_command, pattern="^open_lang_menu$"))
+    app.add_handler(CallbackQueryHandler(cust.check_join_callback, pattern="^check_join$"))
     app.add_handler(CommandHandler("skip_reason", adm.handle_admin_text_input))
     app.add_handler(CommandHandler("cancel_action", adm.handle_admin_text_input))
 
@@ -165,13 +194,29 @@ def main():
         CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
     ]
 
-    menu_regex = r"(إلغاء|شراء اشتراك|محفظتي|Top Up|طلباتي|الدعم|التعليمات|لوحة تحكم الإدارة)"
+    buy_regex = r"^(?:🛒 )?(?:شراء اشتراك|Buy Subscription|Acheter un abonnement)$"
+    wallet_regex = r"(?:محفظتي|My Wallet|Mon Portefeuille|Top Up)"
+    orders_regex = r"^(?:📦 )?(?:طلباتي السابقة|طلباتي|My Orders|Mes Commandes)$"
+    help_regex = r"^(?:📘 )?(?:الدعم والتعليمات|Support & Info|Support & Aide)$"
+    lang_regex = r"^(?:🌐 )?(?:اللغة \(Language\)|تغيير اللغة|Language|Langue)$"
+    cancel_regex = r"^(?:❌ )?(?:إلغاء(?: العملية)?|Cancel|Annuler)$"
+    admin_regex = r"لوحة تحكم الإدارة"
+
+    menu_regex = (
+        r"(شراء اشتراك|Buy Subscription|Acheter un abonnement|"
+        r"محفظتي|My Wallet|Mon Portefeuille|Top Up|"
+        r"طلباتي|My Orders|Mes Commandes|"
+        r"الدعم والتعليمات|Support & Info|Support & Aide|"
+        r"اللغة \(Language\)|تغيير اللغة|^Language$|^Langue$|"
+        r"إلغاء(?: العملية)?|^Cancel$|^Annuler$|"
+        r"لوحة تحكم الإدارة)"
+    )
 
     # 1. Customer Order & Wallet Conversation
     order_conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex(r"شراء اشتراك"), cust.buy_subscription_entry),
-            MessageHandler(filters.Regex(r"محفظتي|Top Up"), cust.wallet_command),
+            MessageHandler(filters.Regex(buy_regex), cust.buy_subscription_entry),
+            MessageHandler(filters.Regex(wallet_regex), cust.wallet_command),
             CommandHandler(["products", "buy"], cust.buy_subscription_entry),
             CommandHandler("wallet", cust.wallet_command),
             *common_order_callbacks,
@@ -183,7 +228,7 @@ def main():
             cust.AWAITING_RECEIPT: [
                 *common_order_callbacks,
                 MessageHandler(filters.PHOTO, cust.receipt_photo_received),
-                MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
+                MessageHandler(filters.Regex(cancel_regex), cust.cancel_order),
             ],
             cust.AWAITING_TRANSFER_NO: [
                 *common_order_callbacks,
@@ -191,7 +236,7 @@ def main():
                     filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_regex),
                     cust.transfer_number_received,
                 ),
-                MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
+                MessageHandler(filters.Regex(cancel_regex), cust.cancel_order),
             ],
             cust.AWAITING_TOPUP_AMOUNT: [
                 *common_order_callbacks,
@@ -199,7 +244,7 @@ def main():
                     filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_regex),
                     cust.wallet_amount_text_received,
                 ),
-                MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
+                MessageHandler(filters.Regex(cancel_regex), cust.cancel_order),
             ],
             cust.AWAITING_TOPUP_PROOF: [
                 *common_order_callbacks,
@@ -208,7 +253,7 @@ def main():
                     filters.TEXT & ~filters.COMMAND & ~filters.Regex(menu_regex),
                     cust.wallet_proof_received,
                 ),
-                MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
+                MessageHandler(filters.Regex(cancel_regex), cust.cancel_order),
             ],
         },
         fallbacks=[
@@ -217,15 +262,20 @@ def main():
             CommandHandler("help", cust.help_command),
             CommandHandler("my_orders", cust.my_orders_command),
             CommandHandler("wallet", cust.wallet_command),
+            CommandHandler(["lang", "language"], cust.language_command),
             CommandHandler("admin", adm.admin_panel_command),
             CommandHandler("cancel", cust.cancel_order),
             CallbackQueryHandler(cust.cancel_order, pattern="^cancel_order$"),
-            MessageHandler(filters.Regex(r"إلغاء"), cust.cancel_order),
-            MessageHandler(filters.Regex(r"شراء اشتراك"), cust.buy_subscription_entry),
-            MessageHandler(filters.Regex(r"محفظتي|Top Up"), cust.wallet_command),
-            MessageHandler(filters.Regex(r"طلباتي"), cust.my_orders_command),
-            MessageHandler(filters.Regex(r"الدعم|التعليمات"), cust.help_command),
-            MessageHandler(filters.Regex(r"لوحة تحكم الإدارة"), adm.admin_panel_command),
+            CallbackQueryHandler(cust.language_selected_callback, pattern="^lang:"),
+            CallbackQueryHandler(cust.language_command, pattern="^open_lang_menu$"),
+            CallbackQueryHandler(cust.check_join_callback, pattern="^check_join$"),
+            MessageHandler(filters.Regex(cancel_regex), cust.cancel_order),
+            MessageHandler(filters.Regex(buy_regex), cust.buy_subscription_entry),
+            MessageHandler(filters.Regex(wallet_regex), cust.wallet_command),
+            MessageHandler(filters.Regex(orders_regex), cust.my_orders_command),
+            MessageHandler(filters.Regex(help_regex), cust.help_command),
+            MessageHandler(filters.Regex(lang_regex), cust.language_command),
+            MessageHandler(filters.Regex(admin_regex), adm.admin_panel_command),
         ],
         allow_reentry=True,
     )
@@ -239,9 +289,13 @@ def main():
     app.add_handler(CommandHandler("help", cust.help_command))
     app.add_handler(CommandHandler("my_orders", cust.my_orders_command))
     app.add_handler(CommandHandler("wallet", cust.wallet_command))
-    app.add_handler(MessageHandler(filters.Regex(r"محفظتي|Top Up"), cust.wallet_command))
-    app.add_handler(MessageHandler(filters.Regex(r"طلباتي"), cust.my_orders_command))
-    app.add_handler(MessageHandler(filters.Regex(r"الدعم|التعليمات"), cust.help_command))
+    app.add_handler(CommandHandler(["lang", "language"], cust.language_command))
+    app.add_handler(CommandHandler("cancel", cust.cancel_order))
+    app.add_handler(MessageHandler(filters.Regex(wallet_regex), cust.wallet_command))
+    app.add_handler(MessageHandler(filters.Regex(orders_regex), cust.my_orders_command))
+    app.add_handler(MessageHandler(filters.Regex(help_regex), cust.help_command))
+    app.add_handler(MessageHandler(filters.Regex(lang_regex), cust.language_command))
+    app.add_handler(MessageHandler(filters.Regex(cancel_regex), cust.cancel_order))
 
     # 3. Admin Panel and Management
     app.add_handler(CommandHandler("admin", adm.admin_panel_command))

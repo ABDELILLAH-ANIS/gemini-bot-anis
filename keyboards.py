@@ -5,6 +5,7 @@ from telegram import (
     KeyboardButton,
 )
 from config import CURRENCY, ADMIN_IDS
+import i18n
 
 
 def _btn(text: str, callback_data: str | None = None, url: str | None = None, style: str | None = None) -> InlineKeyboardButton:
@@ -32,24 +33,57 @@ def _kbtn(text: str, style: str | None = None) -> KeyboardButton:
     return KeyboardButton(text)
 
 
-def get_main_menu(user_id: int):
-    """Main persistent reply keyboard"""
-    buttons = [
+def get_language_selection_keyboard():
+    """Inline keyboard for choosing bot language (Arabic, English, French)"""
+    keyboard = [
         [
-            _kbtn("🛒 شراء اشتراك", style="success"),
-            _kbtn("👛 محفظتي (Top Up)"),
+            _btn("🇩🇿 العربية", callback_data="lang:ar", style="success"),
         ],
         [
-            _kbtn("📦 طلباتي السابقة"),
-            _kbtn("📘 الدعم والتعليمات", style="primary"),
+            _btn("🇬🇧 English", callback_data="lang:en", style="primary"),
+            _btn("🇫🇷 Français", callback_data="lang:fr", style="primary"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_force_join_keyboard(lang: str, channel_statuses: list[dict]):
+    """Inline keyboard with Join buttons for required channels + Verify Membership button"""
+    keyboard = []
+    join_prefix = i18n.t(lang, "force_join_join_prefix")
+    for ch in channel_statuses:
+        title = ch.get("title", "Channel")
+        url = ch.get("url") or "https://t.me/anisgooglebot"
+        badge = "✅" if ch.get("joined") else "📢"
+        style = None if ch.get("joined") else "primary"
+        keyboard.append([_btn(f"{badge} {join_prefix} {title}", url=url, style=style)])
+
+    keyboard.append([_btn(i18n.t(lang, "force_join_btn_verify"), callback_data="check_join", style="success")])
+    keyboard.append([_btn(i18n.t(lang, "btn_change_lang"), callback_data="open_lang_menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_main_menu(user_id: int, lang: str = "ar"):
+    """Main persistent reply keyboard localized in AR/EN/FR"""
+    buttons = [
+        [
+            _kbtn(i18n.t(lang, "menu_buy"), style="success"),
+            _kbtn(i18n.t(lang, "menu_wallet")),
+        ],
+        [
+            _kbtn(i18n.t(lang, "menu_orders")),
+            _kbtn(i18n.t(lang, "menu_help"), style="primary"),
+        ],
+        [
+            _kbtn(i18n.t(lang, "btn_change_lang")),
         ],
     ]
     if user_id in ADMIN_IDS:
-        buttons.append([_kbtn("⚙️ لوحة تحكم الإدارة")])
+        buttons.append([_kbtn(i18n.t(lang, "menu_admin"))])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 
-def get_categories_keyboard():
+def get_categories_keyboard(lang: str = "ar"):
     """3-column Brand Grid keyboard matching the requested design (Gemini=Green, Claude=Red)"""
     keyboard = [
         [
@@ -93,10 +127,10 @@ def get_categories_keyboard():
             _btn("🖼️ Krea", callback_data="cat:krea"),
         ],
         [
-            _btn("🛍️ باقات ومنتجات أخرى", callback_data="cat:other", style="primary"),
+            _btn(i18n.t(lang, "btn_other_brands"), callback_data="cat:other", style="primary"),
         ],
         [
-            _btn("🔙 العودة للقائمة", callback_data="cancel_order"),
+            _btn(i18n.t(lang, "btn_back_menu"), callback_data="cancel_order"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -108,6 +142,7 @@ def get_products_keyboard(
     stock_status: dict | None = None,
     page: int = 0,
     per_page: int = 6,
+    lang: str = "ar",
 ):
     """Paginated inline keyboard for selecting a subscription plan with colored Gemini/Claude buttons"""
     items = list(products.items())
@@ -117,13 +152,14 @@ def get_products_keyboard(
 
     start_idx = page * per_page
     page_items = items[start_idx : start_idx + per_page]
+    curr_lbl = i18n.currency_label(lang)
 
     keyboard = []
     for pid, prod in page_items:
         p_dzd = prod.get("price", 0)
         p_dzd_str = f"{int(p_dzd)}" if float(p_dzd).is_integer() else f"{p_dzd}"
         p_usd = prod.get("price_usd", 2.5)
-        text = f"{prod['name']} — {p_dzd_str} {CURRENCY} (${p_usd})"
+        text = f"{prod['name']} — {p_dzd_str} {curr_lbl} (${p_usd})"
 
         combined_lower = f"{pid} {prod.get('name', '')} {prod.get('category', '')}".lower()
         btn_style = None
@@ -134,22 +170,22 @@ def get_products_keyboard(
 
         keyboard.append([_btn(text, callback_data=f"prod:{pid}", style=btn_style)])
 
-    # Pagination controls ("⬅️ السابق" & "عرض التالي ➡️")
+    # Pagination controls
     if total_pages > 1:
         nav_row = []
         if page > 0:
-            nav_row.append(_btn("⬅️ السابق", callback_data=f"cat_page:{category}:{page - 1}"))
+            nav_row.append(_btn(i18n.t(lang, "btn_prev"), callback_data=f"cat_page:{category}:{page - 1}"))
         nav_row.append(_btn(f"📄 {page + 1}/{total_pages}", callback_data="noop"))
         if page + 1 < total_pages:
-            nav_row.append(_btn("عرض التالي ➡️", callback_data=f"cat_page:{category}:{page + 1}", style="primary"))
+            nav_row.append(_btn(i18n.t(lang, "btn_next"), callback_data=f"cat_page:{category}:{page + 1}", style="primary"))
         keyboard.append(nav_row)
 
-    keyboard.append([_btn("🔙 رجوع للأقسام", callback_data="back_to_categories")])
-    keyboard.append([_btn("❌ إلغاء", callback_data="cancel_order")])
+    keyboard.append([_btn(i18n.t(lang, "btn_back_categories"), callback_data="back_to_categories")])
+    keyboard.append([_btn(i18n.t(lang, "btn_cancel"), callback_data="cancel_order")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_quantity_keyboard(product_id: str, category: str = "gemini", is_admin: bool = False):
+def get_quantity_keyboard(product_id: str, category: str = "gemini", is_admin: bool = False, lang: str = "ar"):
     """Inline keyboard for selecting quantity + Blue Product Instructions button"""
     keyboard = [
         [
@@ -162,7 +198,7 @@ def get_quantity_keyboard(product_id: str, category: str = "gemini", is_admin: b
             _btn("5", callback_data=f"qty:{product_id}:5"),
             _btn("10", callback_data=f"qty:{product_id}:10"),
         ],
-        [_btn("🔵 📖 تعليمات وشروط المنتج", callback_data=f"prod_inst:{product_id}", style="primary")],
+        [_btn(i18n.t(lang, "btn_prod_instructions"), callback_data=f"prod_inst:{product_id}", style="primary")],
     ]
     if is_admin:
         keyboard.append([
@@ -170,75 +206,77 @@ def get_quantity_keyboard(product_id: str, category: str = "gemini", is_admin: b
             _btn("💲 تعديل السعر", callback_data=f"adm_set_price_for:{product_id}", style="success"),
         ])
     keyboard.extend([
-        [_btn("🔙 رجوع للمنتجات", callback_data=f"cat:{category}")],
-        [_btn("❌ إلغاء", callback_data="cancel_order")],
+        [_btn(i18n.t(lang, "btn_back_products"), callback_data=f"cat:{category}")],
+        [_btn(i18n.t(lang, "btn_cancel"), callback_data="cancel_order")],
     ])
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_product_instructions_back_keyboard(product_id: str, category: str = "gemini", is_admin: bool = False):
+def get_product_instructions_back_keyboard(product_id: str, category: str = "gemini", is_admin: bool = False, lang: str = "ar"):
     """Keyboard shown when viewing product instructions"""
     keyboard = [
-        [_btn("🛒 متابعة شراء هذا المنتج", callback_data=f"prod:{product_id}", style="success")],
+        [_btn(i18n.t(lang, "btn_continue_buy"), callback_data=f"prod:{product_id}", style="success")],
     ]
     if is_admin:
         keyboard.append([_btn("✏️ تعديل تعليمة هذا المنتج", callback_data=f"adm_inst_for:{product_id}", style="primary")])
-    keyboard.append([_btn("🔙 رجوع لقائمة المنتجات", callback_data=f"cat:{category}")])
+    keyboard.append([_btn(i18n.t(lang, "btn_back_product_list"), callback_data=f"cat:{category}")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_payment_methods_keyboard(product_id: str, quantity: int, price_usd: float = 2.5, price_dzd: float | None = None):
+def get_payment_methods_keyboard(product_id: str, quantity: int, price_usd: float = 2.5, price_dzd: float | None = None, lang: str = "ar"):
     """Inline keyboard for choosing payment method: Wallet (DZD/USD), BaridiMob, RedotPay, Bybit"""
     total_usd = round(price_usd * quantity, 2)
-    dzd_part = f" ({int(price_dzd * quantity)} {CURRENCY})" if price_dzd else ""
+    curr_lbl = i18n.currency_label(lang)
+    dzd_part = f" ({int(price_dzd * quantity)} {curr_lbl})" if price_dzd else ""
     keyboard = [
-        [_btn(f"👛 الدفع من محفظة الدينار{dzd_part}", callback_data=f"paym:{product_id}:{quantity}:wallet_dzd", style="success")],
-        [_btn(f"👛 الدفع من محفظة الدولار (${total_usd})", callback_data=f"paym:{product_id}:{quantity}:wallet_usd", style="primary")],
-        [_btn(f"🏦 بريدي موب (BaridiMob){dzd_part}", callback_data=f"paym:{product_id}:{quantity}:baridimob")],
-        [_btn(f"💳 RedotPay (${total_usd})", callback_data=f"paym:{product_id}:{quantity}:redotpay")],
-        [_btn(f"🟡 Bybit (${total_usd})", callback_data=f"paym:{product_id}:{quantity}:bybit")],
-        [_btn("🔵 📖 تعليمات المنتج", callback_data=f"prod_inst:{product_id}", style="primary")],
-        [_btn("🔙 رجوع لتحديد الكمية", callback_data=f"prod:{product_id}")],
-        [_btn("❌ إلغاء الطلب", callback_data="cancel_order")],
+        [_btn(i18n.t(lang, "btn_pay_wallet_dzd", dzd_part=dzd_part), callback_data=f"paym:{product_id}:{quantity}:wallet_dzd", style="success")],
+        [_btn(i18n.t(lang, "btn_pay_wallet_usd", total_usd=total_usd), callback_data=f"paym:{product_id}:{quantity}:wallet_usd", style="primary")],
+        [_btn(i18n.t(lang, "btn_pay_baridimob", dzd_part=dzd_part), callback_data=f"paym:{product_id}:{quantity}:baridimob")],
+        [_btn(i18n.t(lang, "btn_pay_redotpay", total_usd=total_usd), callback_data=f"paym:{product_id}:{quantity}:redotpay")],
+        [_btn(i18n.t(lang, "btn_pay_bybit", total_usd=total_usd), callback_data=f"paym:{product_id}:{quantity}:bybit")],
+        [_btn(i18n.t(lang, "btn_prod_instructions_short"), callback_data=f"prod_inst:{product_id}", style="primary")],
+        [_btn(i18n.t(lang, "btn_back_quantity"), callback_data=f"prod:{product_id}")],
+        [_btn(i18n.t(lang, "btn_cancel_order"), callback_data="cancel_order")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_payment_confirm_keyboard():
+def get_payment_confirm_keyboard(lang: str = "ar"):
     """Inline keyboard to proceed to upload receipt"""
     keyboard = [
-        [_btn("📤 إرسال إشعار التحويل ورقم الحوالة", callback_data="upload_receipt", style="success")],
-        [_btn("🔙 تغيير طريقة الدفع", callback_data="change_payment_method")],
-        [_btn("❌ إلغاء الطلب", callback_data="cancel_order")],
+        [_btn(i18n.t(lang, "btn_upload_receipt"), callback_data="upload_receipt", style="success")],
+        [_btn(i18n.t(lang, "btn_change_payment"), callback_data="change_payment_method")],
+        [_btn(i18n.t(lang, "btn_cancel_order"), callback_data="cancel_order")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_wallet_pay_confirm_keyboard(product_id: str):
+def get_wallet_pay_confirm_keyboard(product_id: str, lang: str = "ar"):
     """Inline keyboard to confirm immediate deduction from wallet"""
     keyboard = [
-        [_btn("✅ تأكيد الخصم من المحفظة وإتمام الشراء فوراً", callback_data="confirm_wallet_pay", style="success")],
-        [_btn("🔙 تغيير طريقة الدفع", callback_data="change_payment_method")],
-        [_btn("❌ إلغاء الطلب", callback_data="cancel_order")],
+        [_btn(i18n.t(lang, "btn_confirm_wallet_pay"), callback_data="confirm_wallet_pay", style="success")],
+        [_btn(i18n.t(lang, "btn_change_payment"), callback_data="change_payment_method")],
+        [_btn(i18n.t(lang, "btn_cancel_order"), callback_data="cancel_order")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 # ==================== لوحات المحفظة وشحن الرصيد (Wallet & Top-Up Keyboards) ====================
 
-def get_wallet_main_keyboard():
+def get_wallet_main_keyboard(lang: str = "ar"):
     """Customer Wallet dashboard buttons"""
     keyboard = [
-        [_btn("➕ شحن المحفظة بالدينار 🇩🇿 (Top Up DZD)", callback_data="wallet_topup_curr:dzd", style="success")],
-        [_btn("➕ شحن المحفظة بالدولار 💵 (Top Up USD)", callback_data="wallet_topup_curr:usd", style="primary")],
-        [_btn("📜 سجل عمليات الشحن", callback_data="wallet_history")],
-        [_btn("🛒 الذهاب لشراء اشتراك", callback_data="back_to_categories")],
+        [_btn(i18n.t(lang, "btn_topup_dzd"), callback_data="wallet_topup_curr:dzd", style="success")],
+        [_btn(i18n.t(lang, "btn_topup_usd"), callback_data="wallet_topup_curr:usd", style="primary")],
+        [_btn(i18n.t(lang, "btn_wallet_history"), callback_data="wallet_history")],
+        [_btn(i18n.t(lang, "btn_go_buy"), callback_data="back_to_categories")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_wallet_amount_presets_keyboard(curr_code: str):
+def get_wallet_amount_presets_keyboard(curr_code: str, lang: str = "ar"):
     """Quick amount preset buttons for Top-Up"""
+    curr_short = "دج" if lang == "ar" else ("DA" if lang == "fr" else "DZD")
     if curr_code == "usd":
         presets = [
             [_btn("5$", callback_data="wallet_amt:usd:5"), _btn("10$", callback_data="wallet_amt:usd:10")],
@@ -246,38 +284,38 @@ def get_wallet_amount_presets_keyboard(curr_code: str):
         ]
     else:
         presets = [
-            [_btn("1000 دج", callback_data="wallet_amt:dzd:1000"), _btn("2000 دج", callback_data="wallet_amt:dzd:2000")],
-            [_btn("5000 دج", callback_data="wallet_amt:dzd:5000"), _btn("10000 دج", callback_data="wallet_amt:dzd:10000")],
+            [_btn(f"1000 {curr_short}", callback_data="wallet_amt:dzd:1000"), _btn(f"2000 {curr_short}", callback_data="wallet_amt:dzd:2000")],
+            [_btn(f"5000 {curr_short}", callback_data="wallet_amt:dzd:5000"), _btn(f"10000 {curr_short}", callback_data="wallet_amt:dzd:10000")],
         ]
-    presets.append([_btn("🔙 رجوع للمحفظة", callback_data="wallet_menu")])
-    presets.append([_btn("❌ إلغاء", callback_data="cancel_order")])
+    presets.append([_btn(i18n.t(lang, "btn_back_wallet"), callback_data="wallet_menu")])
+    presets.append([_btn(i18n.t(lang, "btn_cancel"), callback_data="cancel_order")])
     return InlineKeyboardMarkup(presets)
 
 
-def get_wallet_usd_methods_keyboard(amount: float):
+def get_wallet_usd_methods_keyboard(amount: float, lang: str = "ar"):
     """Choose USD payment method for wallet top-up"""
     keyboard = [
         [_btn(f"💳 RedotPay (${amount})", callback_data=f"wallet_paym:usd:{amount}:redotpay", style="primary")],
         [_btn(f"🟡 Bybit (${amount})", callback_data=f"wallet_paym:usd:{amount}:bybit", style="success")],
-        [_btn("🔙 تغيير المبلغ", callback_data="wallet_topup_curr:usd")],
-        [_btn("❌ إلغاء", callback_data="cancel_order")],
+        [_btn(i18n.t(lang, "btn_change_amount"), callback_data="wallet_topup_curr:usd")],
+        [_btn(i18n.t(lang, "btn_cancel"), callback_data="cancel_order")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_wallet_confirm_transfer_keyboard():
+def get_wallet_confirm_transfer_keyboard(lang: str = "ar"):
     """Button for customer to confirm they transferred the top-up money"""
     keyboard = [
-        [_btn("✅ قمت بالتحويل — إرسال الوصل أو تأكيد العملية", callback_data="wallet_upload_proof", style="success")],
-        [_btn("🔙 رجوع للمحفظة", callback_data="wallet_menu")],
-        [_btn("❌ إلغاء", callback_data="cancel_order")],
+        [_btn(i18n.t(lang, "btn_wallet_confirm_transfer"), callback_data="wallet_upload_proof", style="success")],
+        [_btn(i18n.t(lang, "btn_back_wallet"), callback_data="wallet_menu")],
+        [_btn(i18n.t(lang, "btn_cancel"), callback_data="cancel_order")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_cancel_reply_keyboard():
+def get_cancel_reply_keyboard(lang: str = "ar"):
     """Reply keyboard during input steps"""
-    return ReplyKeyboardMarkup([["❌ إلغاء العملية"]], resize_keyboard=True, one_time_keyboard=True)
+    return ReplyKeyboardMarkup([[i18n.t(lang, "menu_cancel")]], resize_keyboard=True, one_time_keyboard=True)
 
 
 # ==================== لوحات تحكم المسؤول (Admin Keyboards) ====================
@@ -349,9 +387,24 @@ def get_admin_menu_keyboard():
             _btn("📢 قناة الإثباتات", callback_data="adm_proof_channel"),
         ],
         [
+            _btn("🔒 القنوات الإجبارية", callback_data="adm_force_join", style="primary"),
             _btn("💳 تعديل بيانات الدفع", callback_data="adm_edit_payment"),
+        ],
+        [
             _btn("🔙 إغلاق اللوحة", callback_data="adm_close"),
         ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_admin_force_join_keyboard(enabled: bool = True):
+    """Keyboard for managing Force-Join required channels"""
+    toggle_label = "🔴 إيقاف شرط الانضمام مؤقتاً" if enabled else "🟢 تفعيل شرط الانضمام"
+    toggle_style = "danger" if enabled else "success"
+    keyboard = [
+        [_btn(toggle_label, callback_data="adm_toggle_force_join", style=toggle_style)],
+        [_btn("🔗 ضبط رابط دعوة الشات (ANISgoogle-bot chat)", callback_data="adm_set_force_chat_url", style="primary")],
+        [_btn("🔙 رجوع للوحة الرئيسية", callback_data="adm_back_menu")],
     ]
     return InlineKeyboardMarkup(keyboard)
 

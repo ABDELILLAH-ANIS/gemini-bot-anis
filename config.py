@@ -132,3 +132,30 @@ DEFAULT_PAYMENT_INFO = os.getenv(
 # Proofs Channel Username or ID (e.g. @my_proofs_channel or -100xxxxxxxxxx)
 PROOF_CHANNEL = os.getenv("PROOF_CHANNEL", "").strip()
 
+# Force-Join Required Channels / Groups before using the bot
+FORCE_JOIN_CHANNELS = [
+    {
+        "id": "main_channel",
+        "chat_id": os.getenv("FORCE_JOIN_CHANNEL_ID", "@anisgooglebot").strip(),
+        "numeric_id": -1003911461538,
+        "url": os.getenv("FORCE_JOIN_CHANNEL_URL", "https://t.me/anisgooglebot").strip(),
+        "title": {
+            "ar": "📢 قناة المتجر (ANISgoogle-bot)",
+            "en": "📢 Store Channel (ANISgoogle-bot)",
+            "fr": "📢 Chaîne du magasin (ANISgoogle-bot)",
+        },
+    },
+    {
+        "id": "main_chat",
+        "chat_id": os.getenv("FORCE_JOIN_CHAT_ID", "-1004297084298").strip(),
+        "numeric_id": -1004297084298,
+        "url": os.getenv("FORCE_JOIN_CHAT_URL", "").strip(),
+        "title": {
+            "ar": "💬 شات المتجر (ANISgoogle-bot chat)",
+            "en": "💬 Store Chat (ANISgoogle-bot chat)",
+            "fr": "💬 Groupe de discussion (ANISgoogle-bot chat)",
+        },
+    },
+]
+
+
