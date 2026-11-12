@@ -171,7 +171,9 @@ async def _check_single_channel(bot, user_id: int, ch: dict, lang: str) -> dict:
 
 
 async def check_user_membership(bot, user_id: int, lang: str = "ar") -> tuple[bool, list[dict]]:
-    """Verify whether the user is a member of all required channels/chats."""
+    """Verify whether the user is a member of all required channels/chats (admins are always exempt)."""
+    if user_id in ADMIN_IDS:
+        return True, []
     if not await database.is_force_join_enabled():
         return True, []
 
